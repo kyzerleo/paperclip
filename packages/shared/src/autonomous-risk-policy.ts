@@ -127,6 +127,8 @@ export const autonomousRiskDecisionSchema = z
     requiresRollback: z.boolean(),
     checkpointManifestId: autonomousRiskIdSchema.nullable(),
     backupManifestId: autonomousRiskIdSchema.nullable(),
+    checkpointManifest: autonomousCheckpointManifestSchema.nullable(),
+    backupManifest: autonomousBackupManifestSchema.nullable(),
     rollback: autonomousRollbackEvidenceSchema.nullable(),
   })
   .strict();
@@ -134,12 +136,18 @@ export type AutonomousRiskDecision = z.infer<typeof autonomousRiskDecisionSchema
 
 export type AutonomousRiskDecisionBindingIssue =
   | "risk_mismatch"
+  | "identity_mismatch"
+  | "decision_id_mismatch"
+  | "reason_code_mismatch"
   | "checkpoint_evidence_missing"
   | "checkpoint_evidence_unexpected"
+  | "checkpoint_binding_mismatch"
   | "backup_evidence_missing"
   | "backup_evidence_unexpected"
+  | "backup_binding_mismatch"
   | "rollback_evidence_missing"
   | "rollback_evidence_unexpected"
+  | "rollback_binding_mismatch"
   | "approval_not_granted"
   | "approval_unexpected"
   | "gate_failed"
@@ -155,23 +163,84 @@ export function getAutonomousRiskDecisionBindingIssue(input: {
   risk: AutonomousRiskClass | "CRITICAL";
   approval: AutonomousApprovalState;
   gateDecision: "PASS" | "FAIL";
+  actionId?: string;
+  executionId?: string;
+  taskId?: string;
 }): AutonomousRiskDecisionBindingIssue | null {
   const { decision, risk, approval, gateDecision } = input;
   if (decision.risk !== risk) return "risk_mismatch";
-  if (decision.requiresCheckpoint !== (decision.checkpointManifestId !== null)) {
+  if (
+    (input.actionId !== undefined && decision.actionId !== input.actionId) ||
+    (input.executionId !== undefined && decision.executionId !== input.executionId) ||
+    (input.taskId !== undefined && decision.taskId !== input.taskId)
+  ) {
+    return "identity_mismatch";
+  }
+  const expectedDecisionId = `autonomous-risk/${decision.actionId}/${decision.risk}/${decision.outcome}/${decision.reasonCode}`;
+  if (decision.decisionId !== expectedDecisionId) return "decision_id_mismatch";
+
+  const checkpointPresent = decision.checkpointManifest !== null;
+  if (decision.requiresCheckpoint !== checkpointPresent) {
     return decision.requiresCheckpoint ? "checkpoint_evidence_missing" : "checkpoint_evidence_unexpected";
   }
-  if (decision.requiresBackup !== (decision.backupManifestId !== null)) {
+  if (decision.checkpointManifestId !== (decision.checkpointManifest?.manifestId ?? null)) {
+    return "checkpoint_binding_mismatch";
+  }
+  if (decision.checkpointManifest && (
+    decision.checkpointManifest.actionId !== decision.actionId ||
+    decision.checkpointManifest.executionId !== decision.executionId ||
+    decision.checkpointManifest.taskId !== decision.taskId
+  )) {
+    return "checkpoint_binding_mismatch";
+  }
+
+  const backupPresent = decision.backupManifest !== null;
+  if (decision.requiresBackup !== backupPresent) {
     return decision.requiresBackup ? "backup_evidence_missing" : "backup_evidence_unexpected";
+  }
+  if (decision.backupManifestId !== (decision.backupManifest?.manifestId ?? null)) {
+    return "backup_binding_mismatch";
+  }
+  if (decision.backupManifest && (
+    decision.backupManifest.actionId !== decision.actionId ||
+    decision.backupManifest.executionId !== decision.executionId ||
+    decision.backupManifest.taskId !== decision.taskId
+  )) {
+    return "backup_binding_mismatch";
   }
   if (decision.requiresRollback !== (decision.rollback !== null)) {
     return decision.requiresRollback ? "rollback_evidence_missing" : "rollback_evidence_unexpected";
+  }
+  if (decision.rollback && !("actionId" in decision.rollback)) return "rollback_binding_mismatch";
+  if (decision.rollback && (
+    decision.rollback.actionId !== decision.actionId ||
+    decision.rollback.executionId !== decision.executionId ||
+    decision.rollback.taskId !== decision.taskId ||
+    decision.rollback.command.manifestId !== decision.rollback.backupManifestId
+  )) {
+    return "rollback_binding_mismatch";
   }
   if (decision.requiresApproval && approval !== "GRANTED") return "approval_not_granted";
   if (!decision.requiresApproval && approval === "GRANTED") return "approval_unexpected";
   if ((decision.requiresCheckpoint || decision.requiresBackup || decision.requiresRollback || decision.requiresApproval) && gateDecision !== "PASS") {
     return "gate_failed";
   }
+  const expectedReasonCode = decision.risk === "LOW"
+    ? "low_disposable"
+    : decision.risk === "MEDIUM"
+      ? decision.outcome === "ALLOW"
+        ? "checkpoint_and_backup_present"
+        : decision.checkpointManifest === null
+          ? "missing_checkpoint"
+          : "missing_backup"
+      : approval === "DENIED"
+        ? "approval_denied"
+        : approval !== "GRANTED"
+          ? "approval_required"
+          : decision.rollback === null
+            ? "missing_rollback"
+            : "approval_and_rollback_present";
+  if (decision.reasonCode !== expectedReasonCode) return "reason_code_mismatch";
   if (decision.outcome !== "ALLOW") return "outcome_not_allow";
   return null;
 }
@@ -210,6 +279,8 @@ function decision(
     requiresRollback: requirements.rollback,
     checkpointManifestId: input.checkpoint?.manifestId ?? null,
     backupManifestId: input.backup?.manifestId ?? null,
+    checkpointManifest: input.checkpoint,
+    backupManifest: input.backup,
     rollback: input.rollback,
   });
 }

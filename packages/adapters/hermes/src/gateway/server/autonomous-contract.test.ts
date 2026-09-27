@@ -52,6 +52,39 @@ function autonomousContext(overrides: Record<string, unknown> = {}): AdapterExec
         risk: "HIGH",
         approval: "GRANTED",
         gates: [{ gateId: "scope", decision: "PASS" }],
+        riskDecision: {
+          decisionId: "autonomous-risk/action-1/HIGH/ALLOW/approval_and_rollback_present",
+          actionId: "action-1",
+          executionId: "execution-1",
+          taskId: "task-1",
+          risk: "HIGH",
+          outcome: "ALLOW",
+          reasonCode: "approval_and_rollback_present",
+          disposable: false,
+          requiresCheckpoint: false,
+          requiresBackup: false,
+          requiresApproval: true,
+          requiresRollback: true,
+          checkpointManifestId: null,
+          backupManifestId: null,
+          checkpointManifest: null,
+          backupManifest: null,
+          rollback: {
+            manifestId: "rollback-1",
+            actionId: "action-1",
+            executionId: "execution-1",
+            taskId: "task-1",
+            createdAt: "2026-09-27T00:00:00.000Z",
+            backupManifestId: "backup-1",
+            command: {
+              rollbackId: "rollback-command-1",
+              manifestId: "backup-1",
+              command: "paperclip restore",
+              args: ["--manifest", "backup-1"],
+              reason: "restore the prior backup",
+            },
+          },
+        },
         ...overrides,
       },
     },
@@ -129,9 +162,71 @@ describe("hermes gateway autonomous boundary", () => {
         requiresRollback: false,
         checkpointManifestId: "checkpoint-1",
         backupManifestId: "backup-1",
+        checkpointManifest: null,
+        backupManifest: null,
         rollback: null,
       },
     }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_mismatch" }));
+  });
+
+  it("requires a serialized risk decision for every non-low-risk action", () => {
+    expect(() => mapPaperclipExecutionToHermesRequest(autonomousContext({ riskDecision: undefined })))
+      .toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_required" }));
+  });
+
+  it("rejects divergent top-level and nested parent execution lineage", () => {
+    const ctx = autonomousContext();
+    ctx.context.parentExecutionId = "top-level-parent";
+    expect(() => mapPaperclipExecutionToHermesRequest(ctx)).toThrowError(
+      expect.objectContaining({ code: "hermes_gateway_parent_execution_mismatch" }),
+    );
+  });
+
+  it("requires canonical decision identifiers, reason codes, and serialized manifest bindings", () => {
+    const ctx = autonomousContext();
+    const autonomous = ctx.context.autonomous as Record<string, unknown>;
+    const decision = autonomous.riskDecision as Record<string, unknown>;
+
+    expect(() => mapPaperclipExecutionToHermesRequest(autonomousContext({
+      riskDecision: { ...decision, decisionId: "tampered-decision" },
+    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_denied" }));
+
+    expect(() => mapPaperclipExecutionToHermesRequest(autonomousContext({
+      riskDecision: {
+        ...decision,
+        decisionId: "autonomous-risk/action-1/HIGH/ALLOW/missing_rollback",
+        reasonCode: "missing_rollback",
+      },
+    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_denied" }));
+
+    expect(() => mapPaperclipExecutionToHermesRequest(autonomousContext({
+      riskDecision: {
+        ...decision,
+        rollback: { ...(decision.rollback as Record<string, unknown>), taskId: "foreign-task" },
+      },
+    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_denied" }));
+  });
+
+  it("fails closed when nested and state-envelope parent lineage diverges", () => {
+    const ctx = autonomousContext();
+    const autonomous = ctx.context.autonomous as Record<string, unknown>;
+    autonomous.stateEnvelope = {
+      schemaVersion: 1,
+      executionId: "execution-1",
+      taskId: "task-1",
+      parentExecutionId: "different-parent",
+      risk: "HIGH",
+      state: "PENDING",
+      dependencies: [],
+      workers: [],
+      gates: [{ gateId: "scope", decision: "PASS" }],
+      attempt: 2,
+      createdAt: "2026-09-27T00:00:00.000Z",
+      updatedAt: "2026-09-27T00:00:00.000Z",
+    };
+    expect(() => mapPaperclipExecutionToHermesRequest(ctx)).toThrowError(
+      expect.objectContaining({ code: "hermes_gateway_parent_execution_mismatch" }),
+    );
   });
 
   it("maps the execution envelope into a redaction-safe Hermes request context", () => {

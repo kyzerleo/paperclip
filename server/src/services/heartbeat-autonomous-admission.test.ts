@@ -215,7 +215,7 @@ describe("heartbeat autonomous admission boundary", () => {
             approval: "GRANTED",
             gates: [{ gateId: "scope", decision: "PASS" }],
             riskDecision: {
-              decisionId: "autonomous-risk/action/MEDIUM/ALLOW/checkpoint_and_backup_present",
+              decisionId: "autonomous-risk/autonomous-action/run-1/task-1/1/WAKEUP/MEDIUM/ALLOW/checkpoint_and_backup_present",
               actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
               executionId: "run-1",
               taskId: "task-1",
@@ -229,6 +229,8 @@ describe("heartbeat autonomous admission boundary", () => {
               requiresRollback: false,
               checkpointManifestId: "checkpoint-1",
               backupManifestId: "backup-1",
+              checkpointManifest: null,
+              backupManifest: null,
               rollback: null,
             },
           },
@@ -253,7 +255,7 @@ describe("heartbeat autonomous admission boundary", () => {
             approval: "GRANTED",
             gates: [{ gateId: "scope", decision: "PASS" }],
             riskDecision: {
-              decisionId: "autonomous-risk/action/HIGH/ALLOW/approval_and_rollback_present",
+              decisionId: "autonomous-risk/autonomous-action/run-1/task-1/1/WAKEUP/HIGH/ALLOW/approval_and_rollback_present",
               actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
               executionId: "run-1",
               taskId: "task-1",
@@ -267,6 +269,8 @@ describe("heartbeat autonomous admission boundary", () => {
               requiresRollback: true,
               checkpointManifestId: null,
               backupManifestId: null,
+              checkpointManifest: null,
+              backupManifest: null,
               rollback: null,
             },
           },
@@ -276,8 +280,21 @@ describe("heartbeat autonomous admission boundary", () => {
   });
 
   it.each([
-    ["checkpoint", { checkpointManifestId: null, backupManifestId: "backup-1" }, "checkpoint_evidence_missing"],
-    ["backup", { checkpointManifestId: "checkpoint-1", backupManifestId: null }, "backup_evidence_missing"],
+    ["checkpoint", { checkpointManifestId: null, backupManifestId: "backup-1", checkpointManifest: null, backupManifest: null }, "checkpoint_evidence_missing"],
+    ["backup", {
+      checkpointManifestId: "checkpoint-1",
+      backupManifestId: null,
+      checkpointManifest: {
+        manifestId: "checkpoint-1",
+        actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
+        executionId: "run-1",
+        taskId: "task-1",
+        createdAt: "2026-09-27T00:00:00.000Z",
+        scope: "issue-1",
+        artifactRefs: ["artifact://run-1/checkpoint"],
+      },
+      backupManifest: null,
+    }, "backup_evidence_missing"],
   ] as const)("fails closed when required %s evidence is absent", async (_name, evidence, issue) => {
     const ledger = {
       register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
@@ -293,7 +310,7 @@ describe("heartbeat autonomous admission boundary", () => {
             risk: "MEDIUM",
             gates: [{ gateId: "scope", decision: "PASS" }],
             riskDecision: {
-              decisionId: "autonomous-risk/action/MEDIUM/ALLOW/checkpoint_and_backup_present",
+              decisionId: "autonomous-risk/autonomous-action/run-1/task-1/1/WAKEUP/MEDIUM/ALLOW/checkpoint_and_backup_present",
               actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
               executionId: "run-1",
               taskId: "task-1",
@@ -356,5 +373,23 @@ describe("heartbeat autonomous admission boundary", () => {
     expect(registered).toMatchObject({
       parentExecutionId: "parent-run-1",
     });
+  });
+
+  it("rejects divergent top-level and nested parent execution lineage", async () => {
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
+      consume: async () => {
+        throw new Error("consume must not run on lineage mismatch");
+      },
+    };
+
+    await expect(
+      admitHeartbeatAutonomousAction(
+        input({
+          parentExecutionId: "top-level-parent",
+          autonomous: { parentExecutionId: "nested-parent" },
+        }, ledger),
+      ),
+    ).rejects.toThrow("autonomous_heartbeat_admission_parent_execution_mismatch");
   });
 });

@@ -413,6 +413,12 @@ function assertActionIdentifier(value: unknown, field: string): string {
   return result;
 }
 
+function readOptionalParentExecutionId(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return assertIdentifier(value, field);
+}
+
 function buildDefaultStateEnvelope(input: {
   executionId: string;
   taskId: string;
@@ -487,9 +493,6 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
   const source = readAutonomousSource(ctx);
   const taskId = assertIdentifier(source.taskId ?? ctx.context.taskId ?? ctx.context.issueId ?? ctx.runId, "taskId");
   const executionId = assertIdentifier(source.executionId ?? ctx.runId, "executionId");
-  const parentExecutionId = source.parentExecutionId === null || source.parentExecutionId === undefined
-    ? null
-    : assertIdentifier(source.parentExecutionId, "parentExecutionId");
   const attempt = source.attempt === undefined ? 1 : source.attempt;
   if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > 3) {
     throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "attempt must be an integer from 1 through 3.");
@@ -518,6 +521,31 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
   if (!approval.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "approval is unsupported.");
   const gates = parseGates(source.gates);
   const riskMetadata = parseRiskMetadata(source.riskMetadata);
+  const stateEnvelopeRaw = source.stateEnvelope;
+  const stateEnvelopeResult = stateEnvelopeRaw === undefined
+    ? null
+    : autonomousStateEnvelopeSchema.safeParse(stateEnvelopeRaw);
+  if (stateEnvelopeResult !== null && !stateEnvelopeResult.success) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "stateEnvelope is malformed.");
+  }
+  let stateEnvelope = stateEnvelopeResult?.success ? stateEnvelopeResult.data : null;
+  if (stateEnvelope && (
+    stateEnvelope.executionId !== executionId ||
+    stateEnvelope.taskId !== taskId ||
+    stateEnvelope.attempt !== attempt ||
+    stateEnvelope.risk !== risk.data
+  )) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "stateEnvelope identity does not match the execution envelope.");
+  }
+  const parentCandidates = [
+    readOptionalParentExecutionId(source.parentExecutionId, "parentExecutionId"),
+    readOptionalParentExecutionId(ctx.context.parentExecutionId, "context.parentExecutionId"),
+    stateEnvelope?.parentExecutionId,
+  ].filter((value): value is string | null => value !== undefined);
+  if (new Set(parentCandidates.map((value) => value ?? "<null>")).size > 1) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_parent_execution_mismatch", "Nested and top-level parentExecutionId values diverge.");
+  }
+  const parentExecutionId = parentCandidates[0] ?? null;
   let riskOutcome = risk.data === "LOW" ? "ALLOW" : "DENY";
   let riskDecisionData: ReturnType<typeof autonomousRiskDecisionSchema.parse> | null = null;
   if (source.riskDecision !== undefined) {
@@ -532,20 +560,10 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
     riskDecisionData = decision.data;
     riskOutcome = decision.data.outcome;
   }
-  let stateEnvelope: AutonomousStateEnvelope;
-  if (source.stateEnvelope !== undefined) {
-    const parsed = autonomousStateEnvelopeSchema.safeParse(source.stateEnvelope);
-    if (!parsed.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "stateEnvelope is malformed.");
-    if (
-      parsed.data.executionId !== executionId ||
-      parsed.data.taskId !== taskId ||
-      parsed.data.attempt !== attempt ||
-      parsed.data.risk !== risk.data
-    ) {
-      throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "stateEnvelope identity does not match the execution envelope.");
-    }
-    stateEnvelope = parsed.data;
-  } else {
+  if (risk.data !== "LOW" && !riskDecisionData) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_risk_decision_required", "Non-low-risk autonomous execution requires a riskDecision.");
+  }
+  if (!stateEnvelope) {
     stateEnvelope = buildDefaultStateEnvelope({
       executionId,
       taskId,
@@ -570,6 +588,9 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
       risk: risk.data,
       approval: approval.data,
       gateDecision,
+      actionId,
+      executionId,
+      taskId,
     });
     if (bindingIssue) {
       throw new HermesGatewayBoundaryError("hermes_gateway_risk_decision_denied", `riskDecision admission evidence is ${bindingIssue}.`);

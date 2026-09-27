@@ -53,6 +53,12 @@ function asIdentifier(value: unknown, fallback: string, field: string): string {
   return candidate;
 }
 
+function readOptionalParentExecutionId(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return asIdentifier(value, "", field);
+}
+
 function readGateDecision(source: JsonObject, additionalGates: readonly unknown[] = []): {
   gateDecision: "PASS" | "FAIL";
   gateCount: number;
@@ -220,14 +226,15 @@ export async function admitHeartbeatAutonomousAction(
   )) {
     throw new Error("autonomous_heartbeat_admission_state_scope_denied");
   }
-  const parentExecutionId = source.parentExecutionId === undefined
-    ? stateEnvelope?.parentExecutionId ?? null
-    : source.parentExecutionId === null
-      ? null
-      : asIdentifier(source.parentExecutionId, executionId, "parent_execution");
-  if (stateEnvelope && stateEnvelope.parentExecutionId !== parentExecutionId) {
-    throw new Error("autonomous_heartbeat_admission_state_scope_denied");
+  const parentCandidates = [
+    readOptionalParentExecutionId(source.parentExecutionId, "parent_execution"),
+    readOptionalParentExecutionId(input.context.parentExecutionId, "context_parent_execution"),
+    stateEnvelope?.parentExecutionId,
+  ].filter((value): value is string | null => value !== undefined);
+  if (new Set(parentCandidates.map((value) => value ?? "<null>")).size > 1) {
+    throw new Error("autonomous_heartbeat_admission_parent_execution_mismatch");
   }
+  const parentExecutionId = parentCandidates[0] ?? null;
   const { gateDecision, gateCount } = readGateDecision(source, stateEnvelope?.gates ?? []);
   const riskDecisionRaw = source.riskDecision;
   const riskDecision = riskDecisionRaw === undefined
@@ -251,6 +258,11 @@ export async function admitHeartbeatAutonomousAction(
       risk,
       approval,
       gateDecision,
+      actionId: typeof source.actionId === "string"
+        ? source.actionId
+        : `autonomous-action/${executionId}/${taskId}/${attempt}/WAKEUP`,
+      executionId,
+      taskId,
     });
     if (bindingIssue) {
       throw new Error(`autonomous_heartbeat_admission_risk_decision_${bindingIssue}`);
