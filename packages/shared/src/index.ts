@@ -2856,3 +2856,5 @@ export { updatePrimaryAgentSchema, type UpdatePrimaryAgent, type PrimaryAgentPre
 export * from "./autonomous-state-contract.js";
 export * from "./autonomous-retry-policy.js";
 export * from "./autonomous-merge-gate.js";
+export * from "./autonomous-idempotency-contract.js";
+export * from "./autonomous-risk-policy.js";
