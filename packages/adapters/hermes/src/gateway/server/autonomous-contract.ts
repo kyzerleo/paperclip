@@ -517,12 +517,14 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
   if (!approval.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "approval is unsupported.");
   const gates = parseGates(source.gates);
   const riskMetadata = parseRiskMetadata(source.riskMetadata);
+  let riskOutcome = risk.data === "LOW" ? "ALLOW" : "DENY";
   if (source.riskDecision !== undefined) {
     const decision = autonomousRiskDecisionSchema.safeParse(source.riskDecision);
     if (!decision.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "riskDecision is malformed.");
     if (decision.data.actionId !== actionId || decision.data.executionId !== executionId || decision.data.taskId !== taskId) {
       throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "riskDecision identity does not match the execution envelope.");
     }
+    riskOutcome = decision.data.outcome;
   }
   let stateEnvelope: AutonomousStateEnvelope;
   if (source.stateEnvelope !== undefined) {
@@ -550,6 +552,13 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
     });
   }
   enforceGatewayGates({ risk: risk.data, gates, stateEnvelope });
+  const effectiveGates = [...gates, ...stateEnvelope.gates];
+  const gateDecision = effectiveGates.length === 0 && risk.data !== "LOW"
+    ? "FAIL"
+    : effectiveGates.every((gate) => gate.decision === "PASS")
+      ? "PASS"
+      : "FAIL";
+  const scopeKey = `${scope.tenantId}/${scope.projectId}/${scope.boardId}/${scope.taskId}/${workerId}`;
   const effect = createAutonomousEffectRecord(autonomousActionRequestSchema.parse({
     actionId,
     idempotencyKey,
@@ -566,6 +575,12 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
       executionId,
       taskId,
       attempt,
+      scope: scopeKey,
+      risk: risk.data,
+      approval: approval.data,
+      gateDecision,
+      riskOutcome,
+      companyId: ctx.agent.companyId,
     },
   }));
   const envelope: HermesGatewayExecutionEnvelope = {

@@ -126,6 +126,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { admitHeartbeatAutonomousAction } from "./heartbeat-autonomous-admission.js";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   CHAT_PROVIDERS,
@@ -25450,6 +25451,15 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
+            await admitHeartbeatAutonomousAction({
+              db,
+              adapterType: agent.adapterType,
+              companyId: agent.companyId,
+              workerId: agent.id,
+              executionId: run.id,
+              runId: run.id,
+              context: adapterContext,
+            });
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
