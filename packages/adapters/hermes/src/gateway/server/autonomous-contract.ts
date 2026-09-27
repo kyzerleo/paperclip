@@ -1,11 +1,13 @@
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import {
+  autonomousActionRequestSchema,
   autonomousApprovalStateSchema,
   autonomousGateDecisionSchema,
   autonomousRiskDecisionSchema,
   autonomousRiskSchema,
   autonomousStateEnvelopeSchema,
   createAutonomousCorrelationMetadata,
+  createAutonomousEffectRecord,
   createAutonomousMergeGateEvidence,
   type AutonomousApprovalState,
   type AutonomousCorrelationMetadata,
@@ -71,6 +73,7 @@ type HermesGatewaySourceEnvelope = {
   parentExecutionId?: unknown;
   attempt?: unknown;
   actionId?: unknown;
+  idempotencyKey?: unknown;
   correlationId?: unknown;
   workerId?: unknown;
   role?: unknown;
@@ -91,6 +94,9 @@ export type HermesGatewayExecutionEnvelope = {
   parentExecutionId: string | null;
   attempt: number;
   actionId: string;
+  idempotencyKey: string;
+  effectKey: string;
+  effectFingerprint: string;
   correlationId: string;
   workerId: string;
   role: string;
@@ -99,7 +105,7 @@ export type HermesGatewayExecutionEnvelope = {
   approval: AutonomousApprovalState;
   gates: HermesGatewayGateMetadata[];
   riskMetadata: HermesGatewayRiskMetadata;
-  stateEnvelope: AutonomousStateEnvelope | null;
+  stateEnvelope: AutonomousStateEnvelope;
 };
 
 export type HermesGatewaySessionIdentity = {
@@ -120,6 +126,9 @@ export type HermesGatewayMappedRequest = {
       parentExecutionId: string | null;
       attempt: number;
       actionId: string;
+      idempotencyKey: string;
+      effectKey: string;
+      effectFingerprint: string;
       correlationId: string;
       workerId: string;
       role: string;
@@ -128,7 +137,7 @@ export type HermesGatewayMappedRequest = {
       approval: AutonomousApprovalState;
       gates: HermesGatewayGateMetadata[];
       riskMetadata: HermesGatewayRiskMetadata;
-      stateEnvelope: AutonomousStateEnvelope | null;
+      stateEnvelope: AutonomousStateEnvelope;
     };
     session: {
       strategy: HermesGatewaySessionStrategy;
@@ -163,6 +172,8 @@ export type HermesGatewayResponseEvidence = {
     timedOut: boolean;
     runId: string;
     actionId: string;
+    effectKey: string;
+    effectFingerprint: string;
     correlationId: string;
   };
 };
@@ -384,13 +395,62 @@ function readAutonomousSource(ctx: AdapterExecutionContext): HermesGatewaySource
   assertNoSensitiveKeys(source);
   const record = readRecord(source, "autonomous");
   const allowed = new Set([
-    "schemaVersion", "executionId", "taskId", "parentExecutionId", "attempt", "actionId", "correlationId",
+    "schemaVersion", "executionId", "taskId", "parentExecutionId", "attempt", "actionId", "idempotencyKey", "correlationId",
     "workerId", "role", "scope", "workerScope", "risk", "approval", "gates", "riskMetadata", "riskDecision", "stateEnvelope",
   ]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "autonomous envelope contains unsupported fields.");
   }
   return record;
+}
+
+function assertActionIdentifier(value: unknown, field: string): string {
+  const result = assertIdentifier(value, field);
+  if (result.length > 256) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", `${field} is too long.`);
+  }
+  return result;
+}
+
+function buildDefaultStateEnvelope(input: {
+  executionId: string;
+  taskId: string;
+  parentExecutionId: string | null;
+  workerId: string;
+  role: string;
+  risk: AutonomousRisk;
+  attempt: number;
+  gates: HermesGatewayGateMetadata[];
+}): AutonomousStateEnvelope {
+  const now = new Date().toISOString();
+  return autonomousStateEnvelopeSchema.parse({
+    schemaVersion: 1,
+    executionId: input.executionId,
+    taskId: input.taskId,
+    parentExecutionId: input.parentExecutionId,
+    risk: input.risk,
+    state: "PENDING",
+    dependencies: [],
+    workers: [{ workerId: input.workerId, role: input.role, state: "PENDING" }],
+    gates: input.gates.map(({ gateId, decision }) => ({ gateId, decision })),
+    attempt: input.attempt,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function enforceGatewayGates(input: {
+  risk: AutonomousRisk;
+  gates: HermesGatewayGateMetadata[];
+  stateEnvelope: AutonomousStateEnvelope;
+}): void {
+  const gates = [...input.gates, ...input.stateEnvelope.gates];
+  if (gates.some((gate) => gate.decision !== "PASS")) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_gate_denied", "Autonomous execution requires every supplied gate to PASS.");
+  }
+  if (input.risk !== "LOW" && gates.length === 0) {
+    throw new HermesGatewayBoundaryError("hermes_gateway_gate_denied", "Non-low-risk autonomous execution requires a passing gate.");
+  }
 }
 
 export function buildHermesGatewaySessionIdentity(input: {
@@ -434,6 +494,10 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
     throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "attempt must be an integer from 1 through 3.");
   }
   const actionId = assertIdentifier(source.actionId ?? `autonomous-action/${executionId}/${taskId}/${attempt}/WAKEUP`, "actionId");
+  const idempotencyKey = assertActionIdentifier(
+    source.idempotencyKey ?? `autonomous-idempotency/${executionId}/${taskId}/${attempt}/WAKEUP`,
+    "idempotencyKey",
+  );
   const correlationId = assertIdentifier(source.correlationId ?? `paperclip/${ctx.runId}/${executionId}`, "correlationId");
   const workerId = assertIdentifier(source.workerId ?? ctx.agent.id, "workerId");
   const role = assertIdentifier(source.role ?? "worker", "role");
@@ -460,15 +524,50 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
       throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "riskDecision identity does not match the execution envelope.");
     }
   }
-  let stateEnvelope: AutonomousStateEnvelope | null = null;
+  let stateEnvelope: AutonomousStateEnvelope;
   if (source.stateEnvelope !== undefined) {
     const parsed = autonomousStateEnvelopeSchema.safeParse(source.stateEnvelope);
     if (!parsed.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "stateEnvelope is malformed.");
-    if (parsed.data.executionId !== executionId || parsed.data.taskId !== taskId || parsed.data.attempt !== attempt) {
+    if (
+      parsed.data.executionId !== executionId ||
+      parsed.data.taskId !== taskId ||
+      parsed.data.attempt !== attempt ||
+      parsed.data.risk !== risk.data
+    ) {
       throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "stateEnvelope identity does not match the execution envelope.");
     }
     stateEnvelope = parsed.data;
+  } else {
+    stateEnvelope = buildDefaultStateEnvelope({
+      executionId,
+      taskId,
+      parentExecutionId,
+      workerId,
+      role,
+      risk: risk.data,
+      attempt,
+      gates,
+    });
   }
+  enforceGatewayGates({ risk: risk.data, gates, stateEnvelope });
+  const effect = createAutonomousEffectRecord(autonomousActionRequestSchema.parse({
+    actionId,
+    idempotencyKey,
+    executionId,
+    taskId,
+    parentExecutionId,
+    workerId,
+    attempt,
+    kind: "WAKEUP",
+    effectType: "hermes_gateway.run",
+    effectPayload: {
+      provider: "hermes_gateway",
+      runId: ctx.runId,
+      executionId,
+      taskId,
+      attempt,
+    },
+  }));
   const envelope: HermesGatewayExecutionEnvelope = {
     schemaVersion: 1,
     executionId,
@@ -476,6 +575,9 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
     parentExecutionId,
     attempt,
     actionId,
+    idempotencyKey,
+    effectKey: effect.effectKey,
+    effectFingerprint: effect.effectFingerprint,
     correlationId,
     workerId,
     role,
@@ -507,6 +609,9 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
         parentExecutionId,
         attempt,
         actionId,
+        idempotencyKey,
+        effectKey: effect.effectKey,
+        effectFingerprint: effect.effectFingerprint,
         correlationId,
         workerId,
         role,
@@ -597,6 +702,8 @@ export function projectHermesResponseEvidence(input: {
       timedOut: input.timedOut === true,
       runId: input.runId,
       actionId: input.envelope.actionId,
+      effectKey: input.envelope.effectKey,
+      effectFingerprint: input.envelope.effectFingerprint,
       correlationId: input.envelope.correlationId,
     },
   };
