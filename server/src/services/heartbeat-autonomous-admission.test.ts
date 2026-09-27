@@ -198,4 +198,163 @@ describe("heartbeat autonomous admission boundary", () => {
       ),
     ).rejects.toThrow("autonomous_heartbeat_admission_denied:approval_not_granted");
   });
+
+  it("fails closed when the risk decision class does not match the request risk", async () => {
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
+      consume: async () => {
+        throw new Error("consume must not run on a risk mismatch");
+      },
+    };
+
+    await expect(
+      admitHeartbeatAutonomousAction(
+        input({
+          autonomous: {
+            risk: "HIGH",
+            approval: "GRANTED",
+            gates: [{ gateId: "scope", decision: "PASS" }],
+            riskDecision: {
+              decisionId: "autonomous-risk/action/MEDIUM/ALLOW/checkpoint_and_backup_present",
+              actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
+              executionId: "run-1",
+              taskId: "task-1",
+              risk: "MEDIUM",
+              outcome: "ALLOW",
+              reasonCode: "checkpoint_and_backup_present",
+              disposable: false,
+              requiresCheckpoint: true,
+              requiresBackup: true,
+              requiresApproval: false,
+              requiresRollback: false,
+              checkpointManifestId: "checkpoint-1",
+              backupManifestId: "backup-1",
+              rollback: null,
+            },
+          },
+        }, ledger),
+      ),
+    ).rejects.toThrow("autonomous_heartbeat_admission_risk_decision_risk_mismatch");
+  });
+
+  it("binds approval, gates, and required evidence to the risk decision", async () => {
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
+      consume: async () => {
+        throw new Error("consume must not run when risk evidence is incomplete");
+      },
+    };
+
+    await expect(
+      admitHeartbeatAutonomousAction(
+        input({
+          autonomous: {
+            risk: "HIGH",
+            approval: "GRANTED",
+            gates: [{ gateId: "scope", decision: "PASS" }],
+            riskDecision: {
+              decisionId: "autonomous-risk/action/HIGH/ALLOW/approval_and_rollback_present",
+              actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
+              executionId: "run-1",
+              taskId: "task-1",
+              risk: "HIGH",
+              outcome: "ALLOW",
+              reasonCode: "approval_and_rollback_present",
+              disposable: false,
+              requiresCheckpoint: false,
+              requiresBackup: false,
+              requiresApproval: true,
+              requiresRollback: true,
+              checkpointManifestId: null,
+              backupManifestId: null,
+              rollback: null,
+            },
+          },
+        }, ledger),
+      ),
+    ).rejects.toThrow("autonomous_heartbeat_admission_risk_decision_rollback_evidence_missing");
+  });
+
+  it.each([
+    ["checkpoint", { checkpointManifestId: null, backupManifestId: "backup-1" }, "checkpoint_evidence_missing"],
+    ["backup", { checkpointManifestId: "checkpoint-1", backupManifestId: null }, "backup_evidence_missing"],
+  ] as const)("fails closed when required %s evidence is absent", async (_name, evidence, issue) => {
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
+      consume: async () => {
+        throw new Error("consume must not run when required evidence is absent");
+      },
+    };
+
+    await expect(
+      admitHeartbeatAutonomousAction(
+        input({
+          autonomous: {
+            risk: "MEDIUM",
+            gates: [{ gateId: "scope", decision: "PASS" }],
+            riskDecision: {
+              decisionId: "autonomous-risk/action/MEDIUM/ALLOW/checkpoint_and_backup_present",
+              actionId: "autonomous-action/run-1/task-1/1/WAKEUP",
+              executionId: "run-1",
+              taskId: "task-1",
+              risk: "MEDIUM",
+              outcome: "ALLOW",
+              reasonCode: "checkpoint_and_backup_present",
+              disposable: false,
+              requiresCheckpoint: true,
+              requiresBackup: true,
+              requiresApproval: false,
+              requiresRollback: false,
+              ...evidence,
+              rollback: null,
+            },
+          },
+        }, ledger),
+      ),
+    ).rejects.toThrow(`autonomous_heartbeat_admission_risk_decision_${issue}`);
+  });
+
+  it("preserves parent execution lineage in the ledger request and effect payload", async () => {
+    let registered: AutonomousActionRequest | null = null;
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => {
+        registered = request;
+        return decision(request);
+      },
+      consume: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => ({
+        outcome: "CONSUMED" as const,
+        actionId: request.actionId,
+        effectKey: "autonomous-effect/test/00000000",
+        effectFingerprint: "00000000",
+      }),
+    };
+    const now = "2026-09-27T22:00:00.000Z";
+
+    await expect(
+      admitHeartbeatAutonomousAction(
+        input({
+          autonomous: {
+            parentExecutionId: "parent-run-1",
+            stateEnvelope: {
+              schemaVersion: 1,
+              executionId: "run-1",
+              taskId: "task-1",
+              parentExecutionId: "parent-run-1",
+              risk: "LOW",
+              state: "PENDING",
+              dependencies: [],
+              workers: [],
+              gates: [],
+              attempt: 1,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        }, ledger),
+      ),
+    ).resolves.toMatchObject({ outcome: "CONSUMED" });
+    expect(registered).toMatchObject({
+      parentExecutionId: "parent-run-1",
+    });
+  });
 });

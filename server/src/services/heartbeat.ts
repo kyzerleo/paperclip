@@ -25451,18 +25451,21 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
-            await admitHeartbeatAutonomousAction({
-              db,
-              adapterType: agent.adapterType,
-              companyId: agent.companyId,
-              workerId: agent.id,
-              executionId: run.id,
-              runId: run.id,
-              context: adapterContext,
-            });
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
-                (markDispatchStarted) => {
+                async (markDispatchStarted) => {
+                  // Consume the autonomous ledger only after the atomic
+                  // resolved-interaction gate has accepted this handoff. A
+                  // lost-race/denied gate must leave the action retryable.
+                  await admitHeartbeatAutonomousAction({
+                    db,
+                    adapterType: agent.adapterType,
+                    companyId: agent.companyId,
+                    workerId: agent.id,
+                    executionId: run.id,
+                    runId: run.id,
+                    context: adapterContext,
+                  });
                   legacyAdapterEntered = true;
                   return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
                     getFreshSessionHandoff,

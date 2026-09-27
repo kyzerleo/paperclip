@@ -9,6 +9,7 @@ import {
   createAutonomousCorrelationMetadata,
   createAutonomousEffectRecord,
   createAutonomousMergeGateEvidence,
+  getAutonomousRiskDecisionBindingIssue,
   type AutonomousApprovalState,
   type AutonomousCorrelationMetadata,
   type AutonomousGateDecision,
@@ -518,12 +519,17 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
   const gates = parseGates(source.gates);
   const riskMetadata = parseRiskMetadata(source.riskMetadata);
   let riskOutcome = risk.data === "LOW" ? "ALLOW" : "DENY";
+  let riskDecisionData: ReturnType<typeof autonomousRiskDecisionSchema.parse> | null = null;
   if (source.riskDecision !== undefined) {
     const decision = autonomousRiskDecisionSchema.safeParse(source.riskDecision);
     if (!decision.success) throw new HermesGatewayBoundaryError("hermes_gateway_envelope_invalid", "riskDecision is malformed.");
     if (decision.data.actionId !== actionId || decision.data.executionId !== executionId || decision.data.taskId !== taskId) {
       throw new HermesGatewayBoundaryError("hermes_gateway_scope_denied", "riskDecision identity does not match the execution envelope.");
     }
+    if (decision.data.risk !== risk.data) {
+      throw new HermesGatewayBoundaryError("hermes_gateway_risk_decision_mismatch", "riskDecision risk does not match the execution envelope.");
+    }
+    riskDecisionData = decision.data;
     riskOutcome = decision.data.outcome;
   }
   let stateEnvelope: AutonomousStateEnvelope;
@@ -558,6 +564,17 @@ export function mapPaperclipExecutionToHermesRequest(ctx: AdapterExecutionContex
     : effectiveGates.every((gate) => gate.decision === "PASS")
       ? "PASS"
       : "FAIL";
+  if (riskDecisionData) {
+    const bindingIssue = getAutonomousRiskDecisionBindingIssue({
+      decision: riskDecisionData,
+      risk: risk.data,
+      approval: approval.data,
+      gateDecision,
+    });
+    if (bindingIssue) {
+      throw new HermesGatewayBoundaryError("hermes_gateway_risk_decision_denied", `riskDecision admission evidence is ${bindingIssue}.`);
+    }
+  }
   const scopeKey = `${scope.tenantId}/${scope.projectId}/${scope.boardId}/${scope.taskId}/${workerId}`;
   const effect = createAutonomousEffectRecord(autonomousActionRequestSchema.parse({
     actionId,

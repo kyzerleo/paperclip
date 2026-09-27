@@ -9,6 +9,7 @@ import {
   autonomousRiskDecisionSchema,
   autonomousRiskSchema,
   autonomousStateEnvelopeSchema,
+  getAutonomousRiskDecisionBindingIssue,
   type AutonomousActionDedupDecision,
   type AutonomousActionRequest,
 } from "@paperclipai/shared";
@@ -104,6 +105,7 @@ function admissionRequest(input: {
   runId: string;
   taskId: string;
   attempt: number;
+  parentExecutionId: string | null;
   scopeKey: string;
   risk: string;
   approval: string;
@@ -125,7 +127,7 @@ function admissionRequest(input: {
     idempotencyKey,
     executionId: input.executionId,
     taskId: input.taskId,
-    parentExecutionId: null,
+    parentExecutionId: input.parentExecutionId,
     workerId: input.workerId,
     attempt: input.attempt,
     kind: "WAKEUP",
@@ -218,6 +220,14 @@ export async function admitHeartbeatAutonomousAction(
   )) {
     throw new Error("autonomous_heartbeat_admission_state_scope_denied");
   }
+  const parentExecutionId = source.parentExecutionId === undefined
+    ? stateEnvelope?.parentExecutionId ?? null
+    : source.parentExecutionId === null
+      ? null
+      : asIdentifier(source.parentExecutionId, executionId, "parent_execution");
+  if (stateEnvelope && stateEnvelope.parentExecutionId !== parentExecutionId) {
+    throw new Error("autonomous_heartbeat_admission_state_scope_denied");
+  }
   const { gateDecision, gateCount } = readGateDecision(source, stateEnvelope?.gates ?? []);
   const riskDecisionRaw = source.riskDecision;
   const riskDecision = riskDecisionRaw === undefined
@@ -235,6 +245,17 @@ export async function admitHeartbeatAutonomousAction(
   )) {
     throw new Error("autonomous_heartbeat_admission_risk_scope_denied");
   }
+  if (riskDecisionData) {
+    const bindingIssue = getAutonomousRiskDecisionBindingIssue({
+      decision: riskDecisionData,
+      risk,
+      approval,
+      gateDecision,
+    });
+    if (bindingIssue) {
+      throw new Error(`autonomous_heartbeat_admission_risk_decision_${bindingIssue}`);
+    }
+  }
   const scopeKey = readScope({
     source,
     companyId: input.companyId,
@@ -251,6 +272,7 @@ export async function admitHeartbeatAutonomousAction(
     runId: input.runId,
     taskId,
     attempt,
+    parentExecutionId,
     scopeKey,
     risk,
     approval,

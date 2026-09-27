@@ -112,6 +112,28 @@ describe("hermes gateway autonomous boundary", () => {
     }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_scope_denied" }));
   });
 
+  it("fails closed when riskDecision risk diverges from the execution envelope", () => {
+    expect(() => mapPaperclipExecutionToHermesRequest(autonomousContext({
+      riskDecision: {
+        decisionId: "autonomous-risk/action/MEDIUM/ALLOW/checkpoint_and_backup_present",
+        actionId: "action-1",
+        executionId: "execution-1",
+        taskId: "task-1",
+        risk: "MEDIUM",
+        outcome: "ALLOW",
+        reasonCode: "checkpoint_and_backup_present",
+        disposable: false,
+        requiresCheckpoint: true,
+        requiresBackup: true,
+        requiresApproval: false,
+        requiresRollback: false,
+        checkpointManifestId: "checkpoint-1",
+        backupManifestId: "backup-1",
+        rollback: null,
+      },
+    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_mismatch" }));
+  });
+
   it("maps the execution envelope into a redaction-safe Hermes request context", () => {
     const request = mapPaperclipExecutionToHermesRequest(autonomousContext());
     expect(request.body.autonomous).toMatchObject({

@@ -132,6 +132,50 @@ export const autonomousRiskDecisionSchema = z
   .strict();
 export type AutonomousRiskDecision = z.infer<typeof autonomousRiskDecisionSchema>;
 
+export type AutonomousRiskDecisionBindingIssue =
+  | "risk_mismatch"
+  | "checkpoint_evidence_missing"
+  | "checkpoint_evidence_unexpected"
+  | "backup_evidence_missing"
+  | "backup_evidence_unexpected"
+  | "rollback_evidence_missing"
+  | "rollback_evidence_unexpected"
+  | "approval_not_granted"
+  | "approval_unexpected"
+  | "gate_failed"
+  | "outcome_not_allow";
+
+/**
+ * Validates that a serialized risk decision is still bound to the admission
+ * evidence that accompanies it. Callers must reject a non-null issue; this
+ * helper deliberately does not infer or repair missing approval/evidence.
+ */
+export function getAutonomousRiskDecisionBindingIssue(input: {
+  decision: AutonomousRiskDecision;
+  risk: AutonomousRiskClass | "CRITICAL";
+  approval: AutonomousApprovalState;
+  gateDecision: "PASS" | "FAIL";
+}): AutonomousRiskDecisionBindingIssue | null {
+  const { decision, risk, approval, gateDecision } = input;
+  if (decision.risk !== risk) return "risk_mismatch";
+  if (decision.requiresCheckpoint !== (decision.checkpointManifestId !== null)) {
+    return decision.requiresCheckpoint ? "checkpoint_evidence_missing" : "checkpoint_evidence_unexpected";
+  }
+  if (decision.requiresBackup !== (decision.backupManifestId !== null)) {
+    return decision.requiresBackup ? "backup_evidence_missing" : "backup_evidence_unexpected";
+  }
+  if (decision.requiresRollback !== (decision.rollback !== null)) {
+    return decision.requiresRollback ? "rollback_evidence_missing" : "rollback_evidence_unexpected";
+  }
+  if (decision.requiresApproval && approval !== "GRANTED") return "approval_not_granted";
+  if (!decision.requiresApproval && approval === "GRANTED") return "approval_unexpected";
+  if ((decision.requiresCheckpoint || decision.requiresBackup || decision.requiresRollback || decision.requiresApproval) && gateDecision !== "PASS") {
+    return "gate_failed";
+  }
+  if (decision.outcome !== "ALLOW") return "outcome_not_allow";
+  return null;
+}
+
 function manifestMatches(
   manifest: { actionId: string; executionId: string; taskId: string } | null,
   input: AutonomousRiskInput,
