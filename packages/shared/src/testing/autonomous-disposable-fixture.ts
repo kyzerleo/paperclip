@@ -54,12 +54,32 @@ type DisposableWorker = {
   scope: DisposableScope;
 };
 
+export type DisposableSessionCheckpoint = {
+  runId: string;
+  taskId: string;
+  issueId: string;
+  sessionId: string;
+  sessionKey: string;
+  timeoutSec: number;
+};
+
+export type DisposableCrashPoint = "none" | "after-state-write-before-effect" | "after-effect-before-ack";
+
+export type DisposableRecoveryResult = {
+  wakeup: ActionResult;
+  worker: WorkerResult;
+  recoveryEvent: "EMITTED" | "EXISTING";
+};
+
 type RuntimeSnapshot = {
   tasks: Array<Pick<DisposableTask, "taskId" | "parentTaskId" | "scope">>;
   workers: DisposableWorker[];
   effects: AutonomousEffectRecord[];
   wakeupEffectKeys: string[];
   retryActionIds: string[];
+  recoveryEventKeys?: string[];
+  pendingActionIds?: string[];
+  sessionCheckpoints?: DisposableSessionCheckpoint[];
 };
 
 type ClaimResult =
@@ -109,6 +129,9 @@ export class DisposableAutonomousFixture {
   private effects: AutonomousEffectRecord[] = [];
   private wakeupEffectKeys = new Set<string>();
   private retryActionIds = new Set<string>();
+  private recoveryEventKeys = new Set<string>();
+  private pendingActionIds = new Set<string>();
+  private sessionCheckpoints = new Map<string, DisposableSessionCheckpoint>();
   private clockMs = Date.parse("2026-09-27T00:00:00.000Z");
   private disposed = false;
 
@@ -186,6 +209,17 @@ export class DisposableAutonomousFixture {
     });
     task.envelope = envelope;
     this.persistEnvelope(envelope);
+    this.persistRuntime();
+  }
+
+  fail(taskId: string): void {
+    const task = this.task(taskId);
+    const envelope = transitionAutonomousState(task.envelope, "FAILED", this.timestamp());
+    task.envelope = autonomousStateEnvelopeSchema.parse({
+      ...envelope,
+      workers: envelope.workers.map((worker) => ({ ...worker, state: "FAILED" as const })),
+    });
+    this.persistEnvelope(task.envelope);
     this.persistRuntime();
   }
 
@@ -293,6 +327,79 @@ export class DisposableAutonomousFixture {
     return decision;
   }
 
+  executeWithCrash(request: AutonomousActionRequest, crashPoint: DisposableCrashPoint): ActionResult {
+    const parsed = autonomousActionRequestSchema.parse(request);
+    this.pendingActionIds.add(parsed.actionId);
+    this.persistRuntime();
+    if (crashPoint === "after-state-write-before-effect") {
+      throw new Error("fixture_crash_after_state_write");
+    }
+    const decision = this.applyAction(parsed);
+    if (crashPoint === "after-effect-before-ack") {
+      throw new Error("fixture_crash_after_effect_before_ack");
+    }
+    this.pendingActionIds.delete(parsed.actionId);
+    this.persistRuntime();
+    return decision;
+  }
+
+  recoverWorker(input: {
+    taskId: string;
+    workerId: string;
+    scope: DisposableScope;
+    wakeup: AutonomousActionRequest;
+  }): DisposableRecoveryResult {
+    const wakeup = this.applyAction(input.wakeup);
+    const alreadyEmitted = this.recoveryEventKeys.has(wakeup.effectKey);
+    this.recoveryEventKeys.add(wakeup.effectKey);
+    const worker = this.ensureWorker({ workerId: input.workerId, taskId: input.taskId, scope: input.scope });
+    this.persistRuntime();
+    return {
+      wakeup,
+      worker,
+      recoveryEvent: alreadyEmitted ? "EXISTING" : "EMITTED",
+    };
+  }
+
+  persistSessionCheckpoint(input: DisposableSessionCheckpoint): void {
+    if (!Number.isFinite(input.timeoutSec) || input.timeoutSec < 0) {
+      throw new Error("Invalid fixture session timeout");
+    }
+    this.sessionCheckpoints.set(input.runId, clone(input));
+    this.persistRuntime();
+  }
+
+  getSessionCheckpoint(runId: string): DisposableSessionCheckpoint {
+    const checkpoint = this.sessionCheckpoints.get(runId);
+    if (!checkpoint) throw new Error(`Unknown fixture session: ${runId}`);
+    return clone(checkpoint);
+  }
+
+  persistedRuntimeText(): string {
+    return readFileSync(runtimeFile(this.root), "utf8");
+  }
+
+  graphSnapshot(): {
+    tasks: Array<{ taskId: string; parentTaskId: string | null; scope: DisposableScope; envelope: AutonomousStateEnvelope }>;
+    workers: DisposableWorker[];
+  } {
+    return clone({
+      tasks: [...this.tasks.values()].map(({ taskId, parentTaskId, scope, envelope }) => ({
+        taskId,
+        parentTaskId,
+        scope,
+        envelope,
+      })),
+      workers: [...this.workers.values()],
+    });
+  }
+
+  workerScope(workerId: string): DisposableScope {
+    const worker = this.workers.get(workerId);
+    if (!worker) throw new Error(`Unknown fixture worker: ${workerId}`);
+    return clone(worker.scope);
+  }
+
   mergeRequest(input: MergeInput): AutonomousMergeRequest {
     return autonomousMergeRequestSchema.parse({
       workerId: input.workerId,
@@ -336,6 +443,10 @@ export class DisposableAutonomousFixture {
     return this.wakeupEffectKeys.size;
   }
 
+  recoveryEventCount(): number {
+    return this.recoveryEventKeys.size;
+  }
+
   async restartLike(): Promise<DisposableAutonomousFixture> {
     return new DisposableAutonomousFixture(this.root, true);
   }
@@ -368,6 +479,9 @@ export class DisposableAutonomousFixture {
       effects: this.effects,
       wakeupEffectKeys: [...this.wakeupEffectKeys],
       retryActionIds: [...this.retryActionIds],
+      recoveryEventKeys: [...this.recoveryEventKeys],
+      pendingActionIds: [...this.pendingActionIds],
+      sessionCheckpoints: [...this.sessionCheckpoints.values()],
     };
     writeFileSync(runtimeFile(this.root), JSON.stringify(snapshot));
   }
@@ -377,6 +491,11 @@ export class DisposableAutonomousFixture {
     this.effects = runtime.effects.map((effect) => autonomousEffectRecordSchema.parse(effect));
     this.wakeupEffectKeys = new Set(runtime.wakeupEffectKeys);
     this.retryActionIds = new Set(runtime.retryActionIds);
+    this.recoveryEventKeys = new Set(runtime.recoveryEventKeys ?? []);
+    this.pendingActionIds = new Set(runtime.pendingActionIds ?? []);
+    for (const checkpoint of runtime.sessionCheckpoints ?? []) {
+      this.sessionCheckpoints.set(checkpoint.runId, clone(checkpoint));
+    }
     for (const worker of runtime.workers) this.workers.set(worker.workerId, clone(worker));
     for (const task of runtime.tasks) {
       const envelope = autonomousStateEnvelopeSchema.parse(

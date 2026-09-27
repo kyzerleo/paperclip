@@ -216,4 +216,149 @@ describe("D10 disposable autonomous orchestration fixture", () => {
     expect(restarted.workerCount()).toBe(1);
     expect(restarted.wakeupCount()).toBe(1);
   });
+
+  it("rehydrates the graph and resumes deterministically after a state-write crash", async () => {
+    const harness = await fixture();
+    const parentTaskId = disposableId("crash-parent");
+    const childTaskId = disposableId("crash-child");
+    const workerId = disposableId("crash-worker");
+    const taskScope = scope();
+    harness.addTask({ taskId: parentTaskId, scope: taskScope });
+    harness.addTask({ taskId: childTaskId, parentTaskId, scope: taskScope });
+    expect(harness.claim(parentTaskId, workerId).outcome).toBe("CLAIMED");
+    const beforeCrash = harness.graphSnapshot();
+    const action = harness.actionRequest({
+      actionId: disposableId("state-write-action"),
+      idempotencyKey: disposableId("state-write-key"),
+      executionId: disposableId("state-write-execution"),
+      taskId: parentTaskId,
+      kind: "EFFECT",
+      effectType: "fixture.write",
+      effectPayload: { value: "resume" },
+    });
+
+    expect(() => harness.executeWithCrash(action, "after-state-write-before-effect")).toThrow("fixture_crash_after_state_write");
+    expect(harness.effectCount()).toBe(0);
+    const restarted = await harness.restartLike();
+    openFixtures.push(restarted);
+    expect(restarted.graphSnapshot()).toEqual(beforeCrash);
+    expect(restarted.getEnvelope(parentTaskId)).toEqual(harness.getEnvelope(parentTaskId));
+    expect(restarted.executeWithCrash(action, "none").outcome).toBe("ACCEPT");
+    expect(restarted.persistedEffectCount()).toBe(1);
+  });
+
+  it("deduplicates a durable effect when the crash follows effect application before acknowledgement", async () => {
+    const harness = await fixture();
+    const taskId = disposableId("ack-crash-task");
+    harness.addTask({ taskId, scope: scope() });
+    const action = harness.actionRequest({
+      actionId: disposableId("ack-crash-action"),
+      idempotencyKey: disposableId("ack-crash-key"),
+      executionId: disposableId("ack-crash-execution"),
+      taskId,
+      kind: "EFFECT",
+      effectType: "fixture.write",
+      effectPayload: { value: "once" },
+    });
+
+    expect(() => harness.executeWithCrash(action, "after-effect-before-ack")).toThrow("fixture_crash_after_effect_before_ack");
+    expect(harness.effectCount()).toBe(1);
+    const restarted = await harness.restartLike();
+    openFixtures.push(restarted);
+    expect(restarted.executeWithCrash(action, "none")).toMatchObject({
+      outcome: "RETURN_EXISTING",
+      existingActionId: action.actionId,
+    });
+    expect(restarted.effectCount()).toBe(1);
+    expect(restarted.persistedEffectCount()).toBe(1);
+  });
+
+  it("recovers pending dependency, worker scope, and gate state exactly", async () => {
+    const harness = await fixture();
+    const parentTaskId = disposableId("pending-parent");
+    const childTaskId = disposableId("pending-child");
+    const taskScope = scope();
+    const workerId = disposableId("pending-worker");
+    harness.addTask({ taskId: parentTaskId, scope: taskScope });
+    harness.addTask({ taskId: childTaskId, parentTaskId, scope: taskScope });
+    harness.claim(parentTaskId, workerId);
+    harness.evaluateGate(parentTaskId, {
+      gateId: "pending-gate",
+      command: "fixture --pending",
+      expected: "pending",
+      observed: "pending",
+      exitCode: null,
+      status: "SKIP",
+      timestamp: "2026-09-27T00:00:10.000Z",
+      evidenceRef: `artifact://${parentTaskId}/pending-gate`,
+    });
+    const beforeRestart = {
+      graph: harness.graphSnapshot(),
+      parent: harness.getEnvelope(parentTaskId),
+      child: harness.getEnvelope(childTaskId),
+      scope: harness.workerScope(workerId),
+    };
+    const restarted = await harness.restartLike();
+    openFixtures.push(restarted);
+    expect({
+      graph: restarted.graphSnapshot(),
+      parent: restarted.getEnvelope(parentTaskId),
+      child: restarted.getEnvelope(childTaskId),
+      scope: restarted.workerScope(workerId),
+    }).toEqual(beforeRestart);
+    expect(restarted.isReady(childTaskId)).toBe(false);
+    expect(restarted.mutateTask(workerId, { taskId: parentTaskId, ...taskScope })).toEqual({ outcome: "ALLOW" });
+  });
+
+  it("emits one recovery event and spawns no duplicate worker across restart", async () => {
+    const harness = await fixture();
+    const taskId = disposableId("recovery-task");
+    const workerId = disposableId("recovery-worker");
+    const taskScope = scope();
+    harness.addTask({ taskId, scope: taskScope });
+    const wakeup = harness.actionRequest({
+      actionId: disposableId("recovery-wakeup"),
+      idempotencyKey: disposableId("recovery-wakeup-key"),
+      executionId: disposableId("recovery-execution"),
+      taskId,
+      kind: "WAKEUP",
+      effectType: "fixture.recovery",
+      effectPayload: { reason: "crash-recovery" },
+    });
+    expect(harness.recoverWorker({ taskId, workerId, scope: taskScope, wakeup })).toMatchObject({
+      recoveryEvent: "EMITTED",
+      worker: { outcome: "REGISTERED" },
+      wakeup: { outcome: "ACCEPT" },
+    });
+    const restarted = await harness.restartLike();
+    openFixtures.push(restarted);
+    expect(restarted.recoverWorker({ taskId, workerId, scope: taskScope, wakeup })).toMatchObject({
+      recoveryEvent: "EXISTING",
+      worker: { outcome: "EXISTING" },
+      wakeup: { outcome: "RETURN_EXISTING" },
+    });
+    expect(restarted.recoveryEventCount()).toBe(1);
+    expect(restarted.workerCount()).toBe(1);
+  });
+
+  it("keeps PASS, FAILED, REPLANNING, and BLOCKED terminal states after restart", async () => {
+    const harness = await fixture();
+    const states = [
+      { label: "pass", expected: "PASS" as const, setup: (id: string) => { harness.addTask({ taskId: id, scope: scope() }); harness.claim(id, disposableId(`${id}-worker`)); harness.complete(id); } },
+      { label: "failed", expected: "FAILED" as const, setup: (id: string) => { harness.addTask({ taskId: id, scope: scope() }); harness.claim(id, disposableId(`${id}-worker`)); harness.fail(id); } },
+      { label: "replanning", expected: "REPLANNING" as const, setup: (id: string) => { harness.addTask({ taskId: id, scope: scope() }); harness.claim(id, disposableId(`${id}-worker`)); [1, 2, 3].forEach(() => harness.injectTransientFailure(id, true)); } },
+      { label: "blocked", expected: "BLOCKED" as const, setup: (id: string) => { harness.addTask({ taskId: id, scope: scope() }); harness.claim(id, disposableId(`${id}-worker`)); [1, 2, 3].forEach(() => harness.injectTransientFailure(id, false)); } },
+    ];
+    const taskIds = states.map(({ label }) => disposableId(`terminal-${label}`));
+    states.forEach(({ setup }, index) => setup(taskIds[index]!));
+    const beforeRestart = taskIds.map((taskId) => harness.getEnvelope(taskId));
+    const restarted = await harness.restartLike();
+    openFixtures.push(restarted);
+    expect(taskIds.map((taskId) => restarted.getEnvelope(taskId))).toEqual(beforeRestart);
+    states.forEach(({ expected }, index) => {
+      const taskId = taskIds[index]!;
+      expect(restarted.getEnvelope(taskId).state).toBe(expected);
+      expect(restarted.claim(taskId, disposableId(`duplicate-${taskId}`))).toMatchObject({ outcome: "DENY", reason: "TASK_ALREADY_CLAIMED" });
+    });
+  });
 });
