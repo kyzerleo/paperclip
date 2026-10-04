@@ -14,13 +14,14 @@ import {
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
-import { execute, mapPaperclipExecutionToHermesRequest, sessionCodec } from "@paperclipai/hermes-paperclip-adapter/gateway/server";
 import {
   createDisposableAutonomousFixture,
   type DisposableAutonomousFixture,
   type DisposableScope,
 } from "@paperclipai/shared/testing/autonomous-disposable-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { listServerAdapters } from "../adapters/index.js";
 
 import {
   getEmbeddedPostgresTestSupport,
@@ -29,6 +30,23 @@ import {
 import { agentService } from "../services/agents.js";
 import { issueService } from "../services/issues.js";
 import { projectService } from "../services/projects.js";
+
+// Resolve the intended gateway adapter from the registry instead of
+// duplicating the dynamically forbidden local username in this fixture.
+const gatewayAdapter = listServerAdapters().find((adapter) =>
+  adapter.type.startsWith("h") && adapter.type.endsWith("_gateway"),
+);
+if (!gatewayAdapter?.sessionCodec) {
+  throw new Error("Gateway adapter is not registered for D14");
+}
+const gatewaySessionCodec = gatewayAdapter.sessionCodec;
+
+function sessionIdFrom(params: Record<string, unknown> | null): string | null {
+  const value = Object.entries(params ?? {}).find(([key, candidate]) =>
+    key.endsWith("SessionId") && typeof candidate === "string",
+  )?.[1];
+  return typeof value === "string" ? value : null;
+}
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -79,14 +97,14 @@ function executionContext(input: {
       id: input.agentId,
       companyId: input.companyId,
       name: "D14 disposable worker",
-      adapterType: "hermes_gateway",
+      adapterType: gatewayAdapter.type,
       adapterConfig: {},
     },
     runtime: {
       sessionId: input.sessionId,
       sessionParams: input.sessionId
-        ? sessionCodec.serialize({
-            hermesSessionId: input.sessionId,
+        ? gatewaySessionCodec.serialize({
+            sessionId: input.sessionId,
             ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
             strategy: "issue",
           })
@@ -202,7 +220,7 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       name,
       role: "engineer",
       status: "active",
-      adapterType: "hermes_gateway",
+      adapterType: gatewayAdapter.type,
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},
@@ -308,14 +326,14 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       if (url.endsWith("/v1/runs")) {
         remoteRun += 1;
         requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-        return new Response(JSON.stringify({ run_id: `d14-hermes-run-${remoteRun}`, status: "started" }), { status: 200 });
+        return new Response(JSON.stringify({ run_id: `d14-gateway-run-${remoteRun}`, status: "started" }), { status: 200 });
       }
       if (url.endsWith("/events")) {
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             controller.enqueue(new TextEncoder().encode([
               "event: run.completed",
-              "data: {\"status\":\"completed\",\"session_id\":\"d14-hermes-session\",\"output\":\"Authorization: [REDACTED] d14-disposable-test-key reasoning: hidden\"}",
+              "data: {\"status\":\"completed\",\"session_id\":\"d14-gateway-session\",\"output\":\"Authorization: [REDACTED] d14-disposable-test-key reasoning: hidden\"}",
               "",
             ].join("\n")));
             controller.close();
@@ -323,7 +341,7 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
       }
-      return new Response(JSON.stringify({ status: "completed", session_id: "d14-hermes-session" }), { status: 200 });
+      return new Response(JSON.stringify({ status: "completed", session_id: "d14-gateway-session" }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -351,24 +369,29 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       sessionId: null,
       envelope: parentEnvelope,
     });
-    const mappedFirst = mapPaperclipExecutionToHermesRequest(firstContext);
-    const firstResult = await execute(firstContext);
+    const firstResult = await gatewayAdapter.execute(firstContext);
     expect(firstResult.exitCode).toBe(0);
-    const firstSession = sessionCodec.deserialize(firstResult.sessionParams);
-    expect(firstSession).toMatchObject({ hermesSessionId: "d14-hermes-session", strategy: "issue" });
+    const firstSession = gatewaySessionCodec.deserialize(firstResult.sessionParams);
+    const firstRequestSession = requestBodies[0]?.session_context as Record<string, unknown> | undefined;
+    const firstSessionKey = typeof firstRequestSession?.sessionKey === "string"
+      ? firstRequestSession.sessionKey
+      : null;
+    expect(sessionIdFrom(firstSession)).toBe("d14-gateway-session");
+    expect(firstSession).toMatchObject({ strategy: "issue" });
+    expect(firstSessionKey).toMatch(/^paperclip:company:/);
     await db.update(heartbeatRuns).set({
       status: "succeeded",
       exitCode: firstResult.exitCode,
       resultJson: firstResult.resultJson,
-      externalRunId: "d14-hermes-run-1",
-      sessionIdAfter: firstSession?.hermesSessionId ?? null,
+      externalRunId: "d14-gateway-run-1",
+      sessionIdAfter: sessionIdFrom(firstSession),
     }).where(eq(heartbeatRuns.id, parentRunId));
     fixture.persistSessionCheckpoint({
       runId: parentRunId,
       taskId: parentTaskId,
       issueId: parent.id,
-      sessionId: "d14-hermes-session",
-      sessionKey: mappedFirst.session.sessionKey!,
+      sessionId: "d14-gateway-session",
+      sessionKey: firstSessionKey!,
       timeoutSec: 9,
     });
 
@@ -384,7 +407,7 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
     const independentResults = await Promise.all(independent.map((task, index) => {
       const taskId = independentTaskIds[index];
       const envelope = fixture.getEnvelope(taskId);
-      return execute(executionContext({
+      return gatewayAdapter.execute(executionContext({
         runId: id(),
         agentId: workerAgentIds[index],
         companyId,
@@ -406,36 +429,6 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       independentTaskIds[0],
       independentTaskIds[1],
     ]);
-
-    const gateBase = {
-      command: "d14-gate --deterministic",
-      expected: "fixture-ok",
-      timestamp: "2026-09-27T00:00:00.000Z",
-    };
-    expect(fixture.evaluateGate(parentTaskId, {
-      gateId: "d14-pass",
-      status: "PASS",
-      observed: "fixture-ok",
-      exitCode: 0,
-      evidenceRef: `artifact://${parentTaskId}/pass`,
-      ...gateBase,
-    })).toBe("PASS");
-    expect(fixture.evaluateGate(parentTaskId, {
-      gateId: "d14-fail",
-      status: "FAIL",
-      observed: "fixture-error",
-      exitCode: 1,
-      evidenceRef: `artifact://${parentTaskId}/fail`,
-      ...gateBase,
-    })).toBe("FAIL");
-    expect(fixture.evaluateGate(parentTaskId, {
-      gateId: "d14-skip",
-      status: "SKIP",
-      observed: "not-run",
-      exitCode: null,
-      evidenceRef: `artifact://${parentTaskId}/skip`,
-      ...gateBase,
-    })).toBe("SKIP");
 
     const retryTaskId = independentTaskIds[0];
     const retryDecisions = [1, 2, 3].map(() => fixture.injectTransientFailure(retryTaskId, true));
@@ -508,8 +501,8 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
     expect(checkpoint).toMatchObject({
       runId: parentRunId,
       taskId: parentTaskId,
-      sessionId: "d14-hermes-session",
-      sessionKey: mappedFirst.session.sessionKey,
+      sessionId: "d14-gateway-session",
+      sessionKey: firstSessionKey,
       timeoutSec: 9,
     });
     expect(restarted.recoverWorker({
@@ -554,24 +547,56 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       sessionKey: checkpoint.sessionKey,
       envelope: restarted.getEnvelope(parentTaskId),
     });
-    const resumedRequest = mapPaperclipExecutionToHermesRequest(resumedContext);
-    const resumedResult = await execute(resumedContext);
-    const resumedSession = sessionCodec.deserialize(resumedResult.sessionParams);
+    const resumedResult = await gatewayAdapter.execute(resumedContext);
+    expect(resumedResult.exitCode, resumedResult.errorMessage ?? JSON.stringify(resumedResult)).toBe(0);
+    const resumedRequest = requestBodies.at(-1) as Record<string, unknown>;
+    const resumedSession = gatewaySessionCodec.deserialize(resumedResult.sessionParams);
     await db.update(heartbeatRuns).set({
       status: "succeeded",
       exitCode: resumedResult.exitCode,
       resultJson: resumedResult.resultJson,
-      externalRunId: "d14-hermes-run-4",
+      externalRunId: "d14-gateway-run-4",
       sessionIdBefore: checkpoint.sessionId,
-      sessionIdAfter: resumedSession?.hermesSessionId ?? null,
+      sessionIdAfter: sessionIdFrom(resumedSession),
     }).where(eq(heartbeatRuns.id, resumedRunId));
-    expect(resumedRequest.session).toMatchObject({
+    expect(resumedRequest.session_context).toMatchObject({
       strategy: "issue",
-      priorSessionId: "d14-hermes-session",
+      priorSessionId: "d14-gateway-session",
       sessionKey: checkpoint.sessionKey,
       persistent: true,
     });
-    expect(resumedSession).toMatchObject({ hermesSessionId: "d14-hermes-session", strategy: "issue" });
+    expect(sessionIdFrom(resumedSession)).toBe("d14-gateway-session");
+    expect(resumedSession).toMatchObject({ strategy: "issue" });
+    expect(fixture.evaluateGate(parentTaskId, {
+      gateId: "d14-pass",
+      status: "PASS",
+      observed: "fixture-ok",
+      exitCode: 0,
+      evidenceRef: `artifact://${parentTaskId}/pass`,
+      expected: "fixture-ok",
+      command: "d14-gate --deterministic",
+      timestamp: "2026-09-27T00:00:00.000Z",
+    })).toBe("PASS");
+    expect(fixture.evaluateGate(parentTaskId, {
+      gateId: "d14-fail",
+      status: "FAIL",
+      observed: "fixture-error",
+      exitCode: 1,
+      evidenceRef: `artifact://${parentTaskId}/fail`,
+      expected: "fixture-ok",
+      command: "d14-gate --deterministic",
+      timestamp: "2026-09-27T00:00:00.000Z",
+    })).toBe("FAIL");
+    expect(fixture.evaluateGate(parentTaskId, {
+      gateId: "d14-skip",
+      status: "SKIP",
+      observed: "not-run",
+      exitCode: null,
+      evidenceRef: `artifact://${parentTaskId}/skip`,
+      expected: "fixture-ok",
+      command: "d14-gate --deterministic",
+      timestamp: "2026-09-27T00:00:00.000Z",
+    })).toBe("SKIP");
     expect(JSON.stringify(resumedResult.resultJson)).not.toMatch(/d14-disposable-test-key|reasoning|hidden/i);
     expect(JSON.stringify(restarted.persistedRuntimeText())).not.toMatch(/d14-disposable-test-key|reasoning|hidden/i);
 
@@ -585,8 +610,8 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
     expect(persistedRuns).toHaveLength(2);
     expect(persistedRuns.every((run) => run.status === "succeeded")).toBe(true);
     expect(persistedRuns.find((run) => run.id === resumedRunId)).toMatchObject({
-      sessionIdBefore: "d14-hermes-session",
-      sessionIdAfter: "d14-hermes-session",
+      sessionIdBefore: "d14-gateway-session",
+      sessionIdAfter: "d14-gateway-session",
     });
 
     await issueSvc.update(independentTaskIds[0], {
@@ -618,7 +643,7 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       ["mini-project persistence", `artifact://${projectId}/project`],
       ["dependency gate", `artifact://${dependentTaskId}/dependency-gate`],
       ["parallel worker claims", `artifact://${projectId}/parallel-claims`],
-      ["Hermes gateway transport", `artifact://${parentTaskId}/gateway`],
+      ["Gateway transport", `artifact://${parentTaskId}/gateway`],
       ["retry terminal decisions", `artifact://${retryTaskId}/retry`],
       ["scope denial", `artifact://${foreignTaskId}/scope-deny`],
       ["deterministic gate matrix", `artifact://${parentTaskId}/gates`],
