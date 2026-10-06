@@ -30,6 +30,7 @@ import {
 import { agentService } from "../services/agents.js";
 import { issueService } from "../services/issues.js";
 import { projectService } from "../services/projects.js";
+import { admitHeartbeatAutonomousAction } from "../services/heartbeat-autonomous-admission.js";
 
 // Resolve the intended gateway adapter from the registry instead of
 // duplicating the dynamically forbidden local username in this fixture.
@@ -546,6 +547,15 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       sessionId: checkpoint.sessionId,
       sessionKey: checkpoint.sessionKey,
       envelope: restarted.getEnvelope(parentTaskId),
+    });
+    await admitHeartbeatAutonomousAction({
+      db,
+      adapterType: gatewayAdapter.type,
+      companyId,
+      workerId: parentAgentId,
+      executionId: resumedRunId,
+      runId: resumedRunId,
+      context: resumedContext.context,
     });
     const resumedResult = await gatewayAdapter.execute(resumedContext);
     expect(resumedResult.exitCode, resumedResult.errorMessage ?? JSON.stringify(resumedResult)).toBe(0);
