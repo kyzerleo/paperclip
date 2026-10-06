@@ -60,7 +60,7 @@ export const autonomousActionLedger = pgTable(
     attemptCheck: check("autonomous_action_ledger_attempt_check", sql`${table.attempt} >= 1`),
     statusCheck: check(
       "autonomous_action_ledger_status_check",
-      sql`${table.status} IN ('accepted', 'consumed')`,
+      sql`${table.status} IN ('accepted', 'claimed', 'consumed')`,
     ),
   }),
 );

@@ -1,4 +1,4 @@
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, lt, or } from "drizzle-orm";
 import {
   autonomousActionRequestSchema,
   createAutonomousEffectRecord,
@@ -137,21 +137,49 @@ export async function consumeAutonomousActionOnce(
       };
     }
 
-    const consumed = await tx
+    const claimed = await tx
       .update(autonomousActionLedger)
-      .set({ status: "consumed", consumedAt: new Date(), updatedAt: new Date() })
+      .set({ status: "claimed", updatedAt: new Date() })
       .where(
         and(
           eq(autonomousActionLedger.id, row.id),
-          eq(autonomousActionLedger.status, "accepted"),
+          or(
+            eq(autonomousActionLedger.status, "accepted"),
+            and(
+              eq(autonomousActionLedger.status, "claimed"),
+              lt(autonomousActionLedger.updatedAt, new Date(Date.now() - 5 * 60_000)),
+            ),
+          ),
         ),
       )
       .returning({ actionId: autonomousActionLedger.actionId });
     return {
-      outcome: consumed[0] ? "CONSUMED" : "ALREADY_CONSUMED",
+      outcome: claimed[0] ? "CONSUMED" : "ALREADY_CONSUMED",
       actionId: row.actionId,
       effectKey: decision.effectKey,
       effectFingerprint: decision.effectFingerprint,
     };
+  });
+}
+
+/** Finalize a claimed effect after the adapter has returned successfully. */
+export async function completeAutonomousAction(
+  db: Db,
+  companyId: string,
+  actionId: string,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const rows = await tx.update(autonomousActionLedger)
+      .set({ status: "consumed", consumedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(autonomousActionLedger.companyId, companyId),
+        eq(autonomousActionLedger.actionId, actionId),
+        or(
+          eq(autonomousActionLedger.status, "claimed"),
+          eq(autonomousActionLedger.status, "consumed"),
+        ),
+      ))
+      .returning({ actionId: autonomousActionLedger.actionId });
+    return rows.length > 0;
   });
 }

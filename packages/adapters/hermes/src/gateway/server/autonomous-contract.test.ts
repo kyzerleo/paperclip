@@ -315,4 +315,12 @@ describe("hermes gateway autonomous boundary", () => {
     expect(JSON.stringify(evidence)).not.toContain("secret-key");
     expect(JSON.stringify(evidence)).not.toMatch(/private chain of thought|reasoning/i);
   });
+
+  it("bounds evidence references independently of action id length", () => {
+    const envelope = { ...mapPaperclipExecutionToHermesRequest(autonomousContext()).envelope, actionId: `action-${"x".repeat(240)}` };
+    const evidence = projectHermesResponseEvidence({ envelope, runId: "run-1", status: "completed", exitCode: 0 });
+    const evidenceRef = evidence.gateEvidence[0].evidenceRef;
+    expect(evidenceRef.length).toBeLessThanOrEqual(512);
+    expect(evidenceRef).not.toContain(envelope.actionId);
+  });
 });

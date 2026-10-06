@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
+  applyPendingMigrations,
+  createDb,
+  getEmbeddedPostgresTestSupport,
+  registerAutonomousAction,
+  startEmbeddedPostgresTestDatabase,
+} from "@paperclipai/db";
+import { autonomousActionLedger } from "@paperclipai/db/schema/autonomous_action_ledger";
+import { companies } from "@paperclipai/db/schema/companies";
+import { and, eq } from "drizzle-orm";
+import {
   createAutonomousEffectRecord,
   type AutonomousActionRequest,
 } from "@paperclipai/shared";
@@ -11,6 +21,8 @@ import {
 } from "./heartbeat-autonomous-admission.js";
 
 const db = {} as Db;
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 function decision(request: AutonomousActionRequest) {
   return {
@@ -48,6 +60,62 @@ function input(
 }
 
 describe("heartbeat autonomous admission boundary", () => {
+  describeEmbeddedPostgres("real heartbeat admission ledger recovery", () => {
+    it("reclaims a stale production ledger claim through heartbeat admission", async () => {
+      const embedded = await startEmbeddedPostgresTestDatabase("heartbeat-autonomous-recovery-");
+      try {
+        await applyPendingMigrations(embedded.connectionString);
+        const realDb = createDb(embedded.connectionString);
+        const companyId = "00000000-0000-0000-0000-000000000019";
+        await realDb.insert(companies).values({ id: companyId, name: "Heartbeat recovery test" });
+        const action: AutonomousActionRequest = {
+          actionId: "autonomous-action/run-recovery/task-recovery/1/WAKEUP",
+          idempotencyKey: "autonomous-idempotency/run-recovery/task-recovery/1/WAKEUP",
+          executionId: "run-recovery",
+          taskId: "task-recovery",
+          parentExecutionId: null,
+          workerId: "worker-recovery",
+          attempt: 1,
+          kind: "WAKEUP",
+          effectType: "hermes_gateway.run",
+          effectPayload: {
+            provider: "hermes_gateway",
+            runId: "run-recovery",
+            executionId: "run-recovery",
+            taskId: "task-recovery",
+            attempt: 1,
+            scope: `${companyId}/paperclip/paperclip/task-recovery/worker-recovery`,
+            risk: "LOW",
+            approval: "NOT_REQUIRED",
+            gateDecision: "PASS",
+            riskOutcome: "ALLOW",
+            companyId,
+          },
+        };
+        await registerAutonomousAction(realDb, companyId, action);
+        await realDb.update(autonomousActionLedger).set({
+          status: "claimed",
+          updatedAt: new Date(Date.now() - 6 * 60_000),
+        }).where(and(
+          eq(autonomousActionLedger.companyId, companyId),
+          eq(autonomousActionLedger.actionId, action.actionId),
+        ));
+
+        await expect(admitHeartbeatAutonomousAction({
+          db: realDb,
+          adapterType: "hermes_gateway",
+          companyId,
+          workerId: "worker-recovery",
+          executionId: action.executionId,
+          runId: action.executionId,
+          context: { taskId: action.taskId, autonomous: {} },
+        })).resolves.toMatchObject({ outcome: "CONSUMED", actionId: action.actionId });
+      } finally {
+        await embedded.cleanup();
+      }
+    }, 240_000);
+  });
+
   it("records the company/worker/task admission and consumes it once", async () => {
     const registered: AutonomousActionRequest[] = [];
     const ledger = {
@@ -112,6 +180,31 @@ describe("heartbeat autonomous admission boundary", () => {
     expect(createAutonomousEffectRecord(registered[0]).effectKey).toBe(
       mapped.body.autonomous.effectKey,
     );
+  });
+
+  it("uses one deterministic autonomous alias source for stable action identity", async () => {
+    const requests: AutonomousActionRequest[] = [];
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => {
+        requests.push(request);
+        return decision(request);
+      },
+      consume: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => ({
+        outcome: "CONSUMED" as const,
+        actionId: request.actionId,
+        effectKey: "autonomous-effect/test/00000000",
+        effectFingerprint: "00000000",
+      }),
+    };
+    const context = {
+      taskId: "task-1",
+      autonomousExecution: { actionId: "stable-action", idempotencyKey: "stable-idempotency" },
+      autonomous: { actionId: "different-action", idempotencyKey: "different-idempotency" },
+    };
+    await admitHeartbeatAutonomousAction(input(context, ledger));
+    await admitHeartbeatAutonomousAction(input(context, ledger));
+    expect(requests.map((request) => request.actionId)).toEqual(["stable-action", "stable-action"]);
+    expect(requests.map((request) => request.idempotencyKey)).toEqual(["stable-idempotency", "stable-idempotency"]);
   });
 
   it("blocks a duplicate action at the server boundary before adapter execution", async () => {
@@ -182,6 +275,26 @@ describe("heartbeat autonomous admission boundary", () => {
     expect(registered).toMatchObject({
       effectPayload: { risk: "HIGH", approval: "NOT_REQUIRED", gateDecision: "PASS", riskOutcome: "DENY" },
     });
+  });
+
+  it("allows policy-compliant MEDIUM admission with NOT_REQUIRED approval", async () => {
+    const ledger = {
+      register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => decision(request),
+      consume: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => ({
+        outcome: "CONSUMED" as const,
+        actionId: request.actionId,
+        effectKey: "autonomous-effect/test/00000000",
+        effectFingerprint: "00000000",
+      }),
+    };
+    const actionId = "autonomous-action/run-1/task-1/1/WAKEUP";
+    const checkpoint = { manifestId: "checkpoint-1", actionId, executionId: "run-1", taskId: "task-1", createdAt: "2026-09-27T00:00:00.000Z", scope: "task-1", artifactRefs: ["artifact://run-1/checkpoint"] };
+    const backup = { manifestId: "backup-1", actionId, executionId: "run-1", taskId: "task-1", createdAt: "2026-09-27T00:00:00.000Z", sourceRef: "artifact://run-1/source", artifactRefs: ["artifact://run-1/backup"] };
+    await expect(admitHeartbeatAutonomousAction(input({ autonomous: {
+      risk: "MEDIUM",
+      gates: [{ gateId: "scope", decision: "PASS" }],
+      riskDecision: { decisionId: `autonomous-risk/${actionId}/MEDIUM/ALLOW/checkpoint_and_backup_present`, actionId, executionId: "run-1", taskId: "task-1", risk: "MEDIUM", outcome: "ALLOW", reasonCode: "checkpoint_and_backup_present", disposable: false, requiresCheckpoint: true, requiresBackup: true, requiresApproval: false, requiresRollback: false, checkpointManifestId: "checkpoint-1", backupManifestId: "backup-1", checkpointManifest: checkpoint, backupManifest: backup, rollback: null },
+    } }, ledger))).resolves.toMatchObject({ outcome: "CONSUMED" });
   });
 
   it("fails closed for an explicitly denied approval", async () => {

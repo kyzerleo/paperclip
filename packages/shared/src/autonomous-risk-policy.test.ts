@@ -6,6 +6,7 @@ import {
   createAutonomousRollbackCommandMetadata,
   createAutonomousRollbackManifest,
   decideAutonomousRisk,
+  getAutonomousRiskDecisionBindingIssue,
   type AutonomousRiskInput,
 } from "./autonomous-risk-policy.js";
 
@@ -104,6 +105,12 @@ describe("autonomous risk policy", () => {
       rollback: rollbackManifest,
     });
     expect(autonomousRiskDecisionSchema.parse(JSON.parse(JSON.stringify(allowed)))).toEqual(allowed);
+  });
+
+  it("derives required rollback from HIGH policy instead of trusting serialized flags", () => {
+    const denied = decideAutonomousRisk({ ...baseInput, risk: "HIGH", approval: "GRANTED" });
+    const forged = { ...denied, requiresRollback: false, reasonCode: "missing_rollback" as const, decisionId: `autonomous-risk/${denied.actionId}/HIGH/DENY/missing_rollback` };
+    expect(getAutonomousRiskDecisionBindingIssue({ decision: forged, risk: "HIGH", approval: "GRANTED", gateDecision: "PASS" })).toBe("rollback_evidence_missing");
   });
 
   it("redacts rollback evidence and strictly rejects secret or chain-of-thought fields", () => {

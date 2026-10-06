@@ -168,7 +168,7 @@ function denyReason(input: {
   if (input.approval === "PENDING" || input.approval === "DENIED") {
     return "approval_not_granted";
   }
-  if (input.risk !== "LOW" && (!input.hasRiskDecision || input.approval !== "GRANTED")) {
+  if (input.risk !== "LOW" && !input.hasRiskDecision) {
     return "non_low_risk_requires_granted_approval";
   }
   if (input.riskOutcome !== "ALLOW") return "risk_decision_denied";
@@ -191,7 +191,9 @@ export async function admitHeartbeatAutonomousAction(
 ): Promise<HeartbeatAutonomousAdmissionResult> {
   if (input.adapterType !== HERMES_GATEWAY_ADAPTER) return { outcome: "SKIPPED" };
 
-  const source = asObject(input.context.autonomous);
+  const source = asObject(
+    input.context.autonomousExecution ?? input.context.autonomous ?? input.context.autonomousEnvelope,
+  );
   const taskId = asIdentifier(
     source.taskId ?? input.context.taskId ?? input.context.issueId,
     input.executionId,

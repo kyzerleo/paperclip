@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import {
   autonomousActionRequestSchema,
@@ -714,7 +715,8 @@ export function projectHermesResponseEvidence(input: {
   const normalizedStatus = input.status.trim().toLowerCase() || "unknown";
   const passed = normalizedStatus === "completed" && input.exitCode === 0;
   const summary = redactEvidenceText(input.summary);
-  const evidenceRef = `artifact://hermes-gateway/${input.envelope.executionId}/${input.runId}/${input.envelope.actionId}`;
+  const actionDigest = createHash("sha256").update(input.envelope.actionId).digest("hex").slice(0, 32);
+  const evidenceRef = `artifact://hermes-gateway/${input.envelope.executionId.slice(0, 96)}/${input.runId.slice(0, 96)}/${actionDigest}`;
   const gateEvidence = [createAutonomousMergeGateEvidence({
     gateId: "global",
     decision: passed ? "PASS" : "FAIL",

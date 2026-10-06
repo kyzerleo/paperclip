@@ -10,6 +10,7 @@ import { companies } from "./schema/companies.js";
 import { autonomousActionLedger } from "./schema/autonomous_action_ledger.js";
 import {
   consumeAutonomousActionOnce,
+  completeAutonomousAction,
   registerAutonomousAction,
 } from "./autonomous-action-ledger.js";
 import type { AutonomousActionRequest } from "@paperclipai/shared";
@@ -81,6 +82,7 @@ describeEmbeddedPostgres("autonomous action ledger persistence", () => {
 
     const consumed = await consumeAutonomousActionOnce(db, companyId, request);
     expect(consumed).toMatchObject({ outcome: "CONSUMED", actionId: request.actionId });
+    expect(await completeAutonomousAction(db, companyId, request.actionId)).toBe(true);
 
     const replay = await consumeAutonomousActionOnce(db, companyId, request);
     expect(replay).toMatchObject({ outcome: "ALREADY_CONSUMED", actionId: request.actionId });
@@ -104,6 +106,6 @@ describeEmbeddedPostgres("autonomous action ledger persistence", () => {
       .select({ status: autonomousActionLedger.status })
       .from(autonomousActionLedger)
       .orderBy(autonomousActionLedger.createdAt);
-    expect(rows).toEqual([{ status: "consumed" }, { status: "consumed" }]);
+    expect(rows).toEqual([{ status: "consumed" }, { status: "claimed" }]);
   }, 240_000);
 });

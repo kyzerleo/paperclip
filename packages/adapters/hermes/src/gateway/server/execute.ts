@@ -223,12 +223,12 @@ function buildHeaders(input: {
 }
 
 function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null): string {
-  // Stable session keys (issue/agent strategy) resume the same remote Hermes
-  // conversation across runs; a stored session id from a prior run means that
-  // conversation already received the task brief, so pick the compact
-  // task-context variant under the shared resume rules.
+  // A non-persistent session is always fresh, even if stale runtime metadata
+  // happens to carry an older session id.
+  const persistSession = ctx.config.persistSession !== false;
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const resumedSession =
+    persistSession &&
     (sessionKeyStrategy === "issue" || sessionKeyStrategy === "agent") &&
     Boolean(nonEmpty(ctx.runtime?.sessionId));
   const { taskContextNote: taskMarkdown, wakePrompt } = selectPaperclipPromptSections(ctx.context, {

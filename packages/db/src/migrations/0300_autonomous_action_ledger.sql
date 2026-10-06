@@ -18,7 +18,7 @@ CREATE TABLE "autonomous_action_ledger" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "autonomous_action_ledger_attempt_check" CHECK ("autonomous_action_ledger"."attempt" >= 1),
-	CONSTRAINT "autonomous_action_ledger_status_check" CHECK ("autonomous_action_ledger"."status" IN ('accepted', 'consumed'))
+	CONSTRAINT "autonomous_action_ledger_status_check" CHECK ("autonomous_action_ledger"."status" IN ('accepted', 'claimed', 'consumed'))
 );
 --> statement-breakpoint
 ALTER TABLE "autonomous_action_ledger" ADD CONSTRAINT "autonomous_action_ledger_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

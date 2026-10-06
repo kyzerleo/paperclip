@@ -126,6 +126,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { completeAutonomousAction } from "@paperclipai/db";
 import { admitHeartbeatAutonomousAction } from "./heartbeat-autonomous-admission.js";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -25457,7 +25458,7 @@ export function heartbeatService(
                   // Consume the autonomous ledger only after the atomic
                   // resolved-interaction gate has accepted this handoff. A
                   // lost-race/denied gate must leave the action retryable.
-                  await admitHeartbeatAutonomousAction({
+                  const autonomousAdmission = await admitHeartbeatAutonomousAction({
                     db,
                     adapterType: agent.adapterType,
                     companyId: agent.companyId,
@@ -25466,8 +25467,24 @@ export function heartbeatService(
                     runId: run.id,
                     context: adapterContext,
                   });
+                  // Ledger admission awaits I/O. Revalidate cancellation and
+                  // durable ownership after that await, immediately before the
+                  // adapter can issue an external request.
+                  const currentRun = await getRun(run.id);
+                  if (
+                    executionControl.controller.signal.aborted ||
+                    !currentRun ||
+                    currentRun.status !== "running" ||
+                    currentRun.companyId !== agent.companyId ||
+                    currentRun.agentId !== agent.id
+                  ) {
+                    if (!executionControl.controller.signal.aborted) {
+                      executionControl.controller.abort(new Error("Run stopped before adapter execution"));
+                    }
+                    throw conflict("Run ownership or cancellation changed before adapter execution");
+                  }
                   legacyAdapterEntered = true;
-                  return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
+                  const result = await withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
                     getFreshSessionHandoff,
                     agentIdentity,
                     runId: run.id,
@@ -25546,6 +25563,10 @@ export function heartbeatService(
                     },
                     authToken: authToken ?? undefined,
                   }));
+                  if (autonomousAdmission.outcome === "CONSUMED") {
+                    await completeAutonomousAction(db, agent.companyId, autonomousAdmission.actionId);
+                  }
+                  return result;
                 },
               );
             if (!guardedDispatch.dispatched) return;

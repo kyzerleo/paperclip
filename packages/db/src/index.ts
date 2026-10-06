@@ -16,6 +16,7 @@ export {
 } from "./client.js";
 export {
   consumeAutonomousActionOnce,
+  completeAutonomousAction,
   registerAutonomousAction,
   type AutonomousConsumeResult,
 } from "./autonomous-action-ledger.js";

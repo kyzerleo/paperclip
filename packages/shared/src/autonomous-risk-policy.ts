@@ -179,6 +179,19 @@ export function getAutonomousRiskDecisionBindingIssue(input: {
   const expectedDecisionId = `autonomous-risk/${decision.actionId}/${decision.risk}/${decision.outcome}/${decision.reasonCode}`;
   if (decision.decisionId !== expectedDecisionId) return "decision_id_mismatch";
 
+  // Recompute the policy from the serialized evidence. The requires* fields,
+  // outcome, and reason are claims, not authority supplied by the caller.
+  const policy = decideAutonomousRisk({
+    actionId: decision.actionId,
+    executionId: decision.executionId,
+    taskId: decision.taskId,
+    risk: decision.risk,
+    approval,
+    checkpoint: decision.checkpointManifest,
+    backup: decision.backupManifest,
+    rollback: decision.rollback,
+  });
+
   const checkpointPresent = decision.checkpointManifest !== null;
   if (decision.requiresCheckpoint !== checkpointPresent) {
     return decision.requiresCheckpoint ? "checkpoint_evidence_missing" : "checkpoint_evidence_unexpected";
@@ -220,28 +233,18 @@ export function getAutonomousRiskDecisionBindingIssue(input: {
   )) {
     return "rollback_binding_mismatch";
   }
+  if (decision.requiresCheckpoint !== policy.requiresCheckpoint) return policy.requiresCheckpoint ? "checkpoint_evidence_missing" : "checkpoint_evidence_unexpected";
+  if (decision.requiresBackup !== policy.requiresBackup) return policy.requiresBackup ? "backup_evidence_missing" : "backup_evidence_unexpected";
+  if (decision.requiresRollback !== policy.requiresRollback) return policy.requiresRollback ? "rollback_evidence_missing" : "rollback_evidence_unexpected";
+  if (decision.requiresApproval !== policy.requiresApproval) return policy.requiresApproval ? "approval_not_granted" : "approval_unexpected";
   if (decision.requiresApproval && approval !== "GRANTED") return "approval_not_granted";
   if (!decision.requiresApproval && approval === "GRANTED") return "approval_unexpected";
   if ((decision.requiresCheckpoint || decision.requiresBackup || decision.requiresRollback || decision.requiresApproval) && gateDecision !== "PASS") {
     return "gate_failed";
   }
-  const expectedReasonCode = decision.risk === "LOW"
-    ? "low_disposable"
-    : decision.risk === "MEDIUM"
-      ? decision.outcome === "ALLOW"
-        ? "checkpoint_and_backup_present"
-        : decision.checkpointManifest === null
-          ? "missing_checkpoint"
-          : "missing_backup"
-      : approval === "DENIED"
-        ? "approval_denied"
-        : approval !== "GRANTED"
-          ? "approval_required"
-          : decision.rollback === null
-            ? "missing_rollback"
-            : "approval_and_rollback_present";
-  if (decision.reasonCode !== expectedReasonCode) return "reason_code_mismatch";
-  if (decision.outcome !== "ALLOW") return "outcome_not_allow";
+  if (decision.reasonCode !== policy.reasonCode) return "reason_code_mismatch";
+  if (decision.outcome !== policy.outcome) return "outcome_not_allow";
+  if (policy.outcome !== "ALLOW") return "outcome_not_allow";
   return null;
 }
 

@@ -433,7 +433,10 @@ export async function execute(
 
   // ── Build prompt ───────────────────────────────────────────────────────
   const sessionId = persistSession ? prevSessionId : undefined;
-  const prompt = buildPrompt(ctx, config, { resumedSession: Boolean(sessionId) });
+  let prompt = buildPrompt(ctx, config, { resumedSession: Boolean(sessionId) });
+  if (agentInstructions) {
+    prompt = agentInstructions + "\n\n---\n\n" + prompt;
+  }
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
