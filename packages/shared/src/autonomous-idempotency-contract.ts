@@ -130,9 +130,11 @@ function stableStringify(value: unknown): string {
 }
 
 function fingerprintAction(input: AutonomousActionRequest): string {
+  // Heartbeat run ids identify an invocation, not the stable external effect.
+  const { runId: _runId, ...stablePayload } = input.effectPayload as Record<string, unknown>;
   const canonical = stableStringify({
     effectType: input.effectType,
-    effectPayload: input.effectPayload,
+    effectPayload: stablePayload,
   });
   let hash = 2_166_136_261;
   for (let index = 0; index < canonical.length; index += 1) {

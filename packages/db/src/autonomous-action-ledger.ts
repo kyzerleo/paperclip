@@ -162,6 +162,43 @@ export async function consumeAutonomousActionOnce(
   });
 }
 
+/** Release an admission reservation when policy denied before dispatch. */
+export async function releaseAutonomousActionReservation(
+  db: Db,
+  companyId: string,
+  actionId: string,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const rows = await tx.delete(autonomousActionLedger)
+      .where(and(
+        eq(autonomousActionLedger.companyId, companyId),
+        eq(autonomousActionLedger.actionId, actionId),
+        eq(autonomousActionLedger.status, "accepted"),
+      ))
+      .returning({ actionId: autonomousActionLedger.actionId });
+    return rows.length > 0;
+  });
+}
+
+/** Mark the remote handoff boundary; stale recovery must not replay it. */
+export async function markAutonomousActionDispatched(
+  db: Db,
+  companyId: string,
+  actionId: string,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const rows = await tx.update(autonomousActionLedger)
+      .set({ status: "dispatched", updatedAt: new Date() })
+      .where(and(
+        eq(autonomousActionLedger.companyId, companyId),
+        eq(autonomousActionLedger.actionId, actionId),
+        eq(autonomousActionLedger.status, "claimed"),
+      ))
+      .returning({ actionId: autonomousActionLedger.actionId });
+    return rows.length > 0;
+  });
+}
+
 /** Finalize a claimed effect after the adapter has returned successfully. */
 export async function completeAutonomousAction(
   db: Db,
@@ -176,6 +213,7 @@ export async function completeAutonomousAction(
         eq(autonomousActionLedger.actionId, actionId),
         or(
           eq(autonomousActionLedger.status, "claimed"),
+          eq(autonomousActionLedger.status, "dispatched"),
           eq(autonomousActionLedger.status, "consumed"),
         ),
       ))

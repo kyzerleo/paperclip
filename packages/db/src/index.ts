@@ -17,7 +17,9 @@ export {
 export {
   consumeAutonomousActionOnce,
   completeAutonomousAction,
+  markAutonomousActionDispatched,
   registerAutonomousAction,
+  releaseAutonomousActionReservation,
   type AutonomousConsumeResult,
 } from "./autonomous-action-ledger.js";
 export {

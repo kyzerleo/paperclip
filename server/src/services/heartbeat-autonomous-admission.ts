@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import {
   consumeAutonomousActionOnce,
+  releaseAutonomousActionReservation,
   registerAutonomousAction,
 } from "@paperclipai/db";
 import {
@@ -22,6 +23,7 @@ type JsonObject = Record<string, unknown>;
 type HeartbeatAutonomousLedger = {
   register: typeof registerAutonomousAction;
   consume: typeof consumeAutonomousActionOnce;
+  release?: typeof releaseAutonomousActionReservation;
 };
 
 export type HeartbeatAutonomousAdmissionInput = {
@@ -319,6 +321,7 @@ export async function admitHeartbeatAutonomousAction(
   const ledger = input.ledger ?? {
     register: registerAutonomousAction,
     consume: consumeAutonomousActionOnce,
+    release: releaseAutonomousActionReservation,
   };
   const registered = await ledger.register(input.db, input.companyId, request);
   const reason = denyReason({
@@ -329,7 +332,10 @@ export async function admitHeartbeatAutonomousAction(
     riskOutcome,
     hasRiskDecision: riskDecisionData !== null,
   });
-  if (reason) throwDenied(reason, registered);
+  if (reason) {
+    await ledger.release?.(input.db, input.companyId, registered.actionId);
+    throwDenied(reason, registered);
+  }
   const consumed = await ledger.consume(input.db, input.companyId, request);
   if (consumed.outcome === "ALREADY_CONSUMED") {
     throw new Error(`autonomous_heartbeat_admission_duplicate:${consumed.actionId}`);

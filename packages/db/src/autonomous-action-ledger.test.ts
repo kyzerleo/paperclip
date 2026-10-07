@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import {
   applyPendingMigrations,
@@ -11,6 +12,7 @@ import { autonomousActionLedger } from "./schema/autonomous_action_ledger.js";
 import {
   consumeAutonomousActionOnce,
   completeAutonomousAction,
+  markAutonomousActionDispatched,
   registerAutonomousAction,
 } from "./autonomous-action-ledger.js";
 import type { AutonomousActionRequest } from "@paperclipai/shared";
@@ -107,5 +109,28 @@ describeEmbeddedPostgres("autonomous action ledger persistence", () => {
       .from(autonomousActionLedger)
       .orderBy(autonomousActionLedger.createdAt);
     expect(rows).toEqual([{ status: "consumed" }, { status: "claimed" }]);
+  }, 240_000);
+
+  it("retries stale pre-dispatch claims but does not replay a dispatched handoff", async () => {
+    const embedded = await startEmbeddedPostgresTestDatabase("autonomous-action-recovery-");
+    cleanups.push(embedded.cleanup);
+    await applyPendingMigrations(embedded.connectionString);
+    const db = createDb(embedded.connectionString);
+    cleanups.push(async () => db.$client.end({ timeout: 1 }));
+    const companyId = "00000000-0000-0000-0000-000000000018";
+    await db.insert(companies).values({ id: companyId, name: "Autonomous recovery test" });
+
+    const first = await consumeAutonomousActionOnce(db, companyId, { ...request, actionId: "recovery-pre", idempotencyKey: "recovery-pre-key" });
+    expect(first.outcome).toBe("CONSUMED");
+    await db.update(autonomousActionLedger).set({ updatedAt: new Date(Date.now() - 6 * 60_000) }).where(eq(autonomousActionLedger.actionId, "recovery-pre"));
+    const retried = await consumeAutonomousActionOnce(db, companyId, { ...request, actionId: "recovery-pre", idempotencyKey: "recovery-pre-key" });
+    expect(retried.outcome).toBe("CONSUMED");
+
+    const handoff = await consumeAutonomousActionOnce(db, companyId, { ...request, actionId: "recovery-handoff", idempotencyKey: "recovery-handoff-key" });
+    expect(handoff.outcome).toBe("CONSUMED");
+    expect(await markAutonomousActionDispatched(db, companyId, "recovery-handoff")).toBe(true);
+    await db.update(autonomousActionLedger).set({ updatedAt: new Date(Date.now() - 6 * 60_000) }).where(eq(autonomousActionLedger.actionId, "recovery-handoff"));
+    const noReplay = await consumeAutonomousActionOnce(db, companyId, { ...request, actionId: "recovery-handoff", idempotencyKey: "recovery-handoff-key" });
+    expect(noReplay.outcome).toBe("ALREADY_CONSUMED");
   }, 240_000);
 });

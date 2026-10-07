@@ -63,12 +63,32 @@ describe("Hermes gateway production activation seam", () => {
     expect(first.body.autonomous.effectFingerprint).toBe(second.body.autonomous.effectFingerprint);
   });
 
+  it("keeps effect identity stable when only the heartbeat run id changes", () => {
+    const make = (runId: string) => mapPaperclipExecutionToHermesRequest({
+      ...context(),
+      runId,
+      context: {
+        ...context().context,
+        autonomous: {
+          executionId: "stable-execution",
+          taskId: "task-activation-1",
+          actionId: "stable-action",
+          idempotencyKey: "stable-idempotency",
+        },
+      },
+    });
+    const first = make("heartbeat-run-1");
+    const second = make("heartbeat-run-2");
+    expect(first.body.autonomous.effectFingerprint).toBe(second.body.autonomous.effectFingerprint);
+    expect(first.body.autonomous.effectKey).toBe(second.body.autonomous.effectKey);
+  });
+
   it("denies a non-low-risk execution without a passing gate before transport mapping", () => {
     expect(() => mapPaperclipExecutionToHermesRequest(context({
       risk: "HIGH",
       approval: "GRANTED",
       gates: [],
-    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_gate_denied" }));
+    }))).toThrowError(expect.objectContaining({ code: "hermes_gateway_risk_decision_required" }));
   });
 
   it("denies an explicitly failed or skipped gate before transport mapping", () => {

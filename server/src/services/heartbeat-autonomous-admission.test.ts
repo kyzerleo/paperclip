@@ -308,6 +308,7 @@ describe("heartbeat autonomous admission boundary", () => {
 
   it("records a failed gate and denies before the adapter boundary", async () => {
     let consumeCalls = 0;
+    let releaseCalls = 0;
     let registered: AutonomousActionRequest | null = null;
     const ledger = {
       register: async (_db: Db, _companyId: string, request: AutonomousActionRequest) => {
@@ -318,6 +319,7 @@ describe("heartbeat autonomous admission boundary", () => {
         consumeCalls += 1;
         throw new Error("consume must not run on deny");
       },
+      release: async () => { releaseCalls += 1; return true; },
     };
 
     await expect(
@@ -331,6 +333,7 @@ describe("heartbeat autonomous admission boundary", () => {
       effectPayload: { gateDecision: "FAIL", riskOutcome: "ALLOW" },
     });
     expect(consumeCalls).toBe(0);
+    expect(releaseCalls).toBe(1);
   });
 
   it("fails closed for non-low risk without a granted risk decision", async () => {

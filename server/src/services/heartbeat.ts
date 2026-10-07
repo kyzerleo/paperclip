@@ -126,7 +126,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { completeAutonomousAction } from "@paperclipai/db";
+import { completeAutonomousAction, markAutonomousActionDispatched } from "@paperclipai/db";
 import {
   admitHeartbeatAutonomousAction,
   assertHeartbeatAutonomousDispatchOwnership,
@@ -25524,7 +25524,12 @@ export function heartbeatService(
                       );
                     },
                     onProviderStopped: collectStoppedInstructions,
-                    onDispatch: markDispatchStarted,
+                    onDispatch: () => {
+                      markDispatchStarted();
+                      if (autonomousAdmission.outcome === "CONSUMED") {
+                        void markAutonomousActionDispatched(db, agent.companyId, autonomousAdmission.actionId);
+                      }
+                    },
                     signal: executionControl.controller.signal,
                     ...(executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? {
                       stopRemoteStartup: async () => {
