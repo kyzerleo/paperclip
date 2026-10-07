@@ -127,7 +127,10 @@ import {
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { completeAutonomousAction } from "@paperclipai/db";
-import { admitHeartbeatAutonomousAction } from "./heartbeat-autonomous-admission.js";
+import {
+  admitHeartbeatAutonomousAction,
+  assertHeartbeatAutonomousDispatchOwnership,
+} from "./heartbeat-autonomous-admission.js";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   CHAT_PROVIDERS,
@@ -25471,13 +25474,14 @@ export function heartbeatService(
                   // durable ownership after that await, immediately before the
                   // adapter can issue an external request.
                   const currentRun = await getRun(run.id);
-                  if (
-                    executionControl.controller.signal.aborted ||
-                    !currentRun ||
-                    currentRun.status !== "running" ||
-                    currentRun.companyId !== agent.companyId ||
-                    currentRun.agentId !== agent.id
-                  ) {
+                  try {
+                    assertHeartbeatAutonomousDispatchOwnership({
+                      aborted: executionControl.controller.signal.aborted,
+                      currentRun,
+                      companyId: agent.companyId,
+                      agentId: agent.id,
+                    });
+                  } catch {
                     if (!executionControl.controller.signal.aborted) {
                       executionControl.controller.abort(new Error("Run stopped before adapter execution"));
                     }

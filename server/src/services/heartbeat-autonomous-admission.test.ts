@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
   applyPendingMigrations,
@@ -17,6 +17,7 @@ import {
 import { mapPaperclipExecutionToHermesRequest } from "@paperclipai/hermes-paperclip-adapter/gateway/server";
 import {
   admitHeartbeatAutonomousAction,
+  assertHeartbeatAutonomousDispatchOwnership,
   type HeartbeatAutonomousAdmissionInput,
 } from "./heartbeat-autonomous-admission.js";
 
@@ -109,6 +110,83 @@ describe("heartbeat autonomous admission boundary", () => {
           executionId: action.executionId,
           runId: action.executionId,
           context: { taskId: action.taskId, autonomous: {} },
+        })).resolves.toMatchObject({ outcome: "CONSUMED", actionId: action.actionId });
+      } finally {
+        await embedded.cleanup();
+      }
+    }, 240_000);
+
+    it("revalidates production ownership after ledger claim and skips the remote run on reassignment", async () => {
+      const embedded = await startEmbeddedPostgresTestDatabase("heartbeat-autonomous-reassignment-");
+      try {
+        await applyPendingMigrations(embedded.connectionString);
+        const realDb = createDb(embedded.connectionString);
+        const companyId = "00000000-0000-0000-0000-000000000020";
+        await realDb.insert(companies).values({ id: companyId, name: "Heartbeat reassignment test" });
+        const action: AutonomousActionRequest = {
+          actionId: "autonomous-action/run-reassignment/task-reassignment/1/WAKEUP",
+          idempotencyKey: "autonomous-idempotency/run-reassignment/task-reassignment/1/WAKEUP",
+          executionId: "run-reassignment",
+          taskId: "task-reassignment",
+          parentExecutionId: null,
+          workerId: "worker-reassignment",
+          attempt: 1,
+          kind: "WAKEUP",
+          effectType: "hermes_gateway.run",
+          effectPayload: {
+            provider: "hermes_gateway",
+            runId: "run-reassignment",
+            executionId: "run-reassignment",
+            taskId: "task-reassignment",
+            attempt: 1,
+            scope: `${companyId}/paperclip/paperclip/task-reassignment/worker-reassignment`,
+            risk: "LOW",
+            approval: "NOT_REQUIRED",
+            gateDecision: "PASS",
+            riskOutcome: "ALLOW",
+            companyId,
+          },
+        };
+        const remotePost = vi.fn();
+        const admission = await admitHeartbeatAutonomousAction({
+          db: realDb,
+          adapterType: "hermes_gateway",
+          companyId,
+          workerId: "worker-reassignment",
+          executionId: action.executionId,
+          runId: action.executionId,
+          context: { taskId: action.taskId, autonomous: action },
+        });
+        expect(admission).toMatchObject({ outcome: "CONSUMED", actionId: action.actionId });
+        expect((await realDb.select().from(autonomousActionLedger)).at(0)).toMatchObject({ status: "claimed" });
+
+        // This is the production ordering: admission has claimed the ledger,
+        // then ownership changes before the adapter's remote POST boundary.
+        try {
+          assertHeartbeatAutonomousDispatchOwnership({
+            aborted: false,
+            currentRun: { status: "running", companyId, agentId: "new-owner" },
+            companyId,
+            agentId: "worker-reassignment",
+          });
+          remotePost();
+        } catch (error) {
+          expect(error).toHaveProperty("message", "autonomous_heartbeat_dispatch_ownership_changed");
+        }
+        expect(remotePost).not.toHaveBeenCalled();
+
+        // A stale claim remains recoverable by the existing retry-safe ledger rule.
+        await realDb.update(autonomousActionLedger).set({
+          updatedAt: new Date(Date.now() - 6 * 60_000),
+        }).where(eq(autonomousActionLedger.actionId, action.actionId));
+        await expect(admitHeartbeatAutonomousAction({
+          db: realDb,
+          adapterType: "hermes_gateway",
+          companyId,
+          workerId: "worker-reassignment",
+          executionId: action.executionId,
+          runId: action.executionId,
+          context: { taskId: action.taskId, autonomous: action },
         })).resolves.toMatchObject({ outcome: "CONSUMED", actionId: action.actionId });
       } finally {
         await embedded.cleanup();

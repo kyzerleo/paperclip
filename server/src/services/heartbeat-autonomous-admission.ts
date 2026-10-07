@@ -39,6 +39,29 @@ export type HeartbeatAutonomousAdmissionResult =
   | { outcome: "SKIPPED" }
   | { outcome: "CONSUMED"; actionId: string; effectKey: string; effectFingerprint: string };
 
+/**
+ * Keep the last ownership check adjacent to the admission boundary. The
+ * heartbeat caller must invoke this after ledger admission and immediately
+ * before entering the adapter, so a cancellation or reassignment cannot turn
+ * a claimed action into an external run.
+ */
+export function assertHeartbeatAutonomousDispatchOwnership(input: {
+  aborted: boolean;
+  currentRun: { status: string; companyId: string; agentId: string } | null;
+  companyId: string;
+  agentId: string;
+}): void {
+  if (
+    input.aborted ||
+    !input.currentRun ||
+    input.currentRun.status !== "running" ||
+    input.currentRun.companyId !== input.companyId ||
+    input.currentRun.agentId !== input.agentId
+  ) {
+    throw new Error("autonomous_heartbeat_dispatch_ownership_changed");
+  }
+}
+
 function asObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as JsonObject
