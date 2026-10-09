@@ -280,7 +280,7 @@ export interface AdapterExecutionContext {
    * without a local process should call this immediately before starting the
    * remote operation.
    */
-  onDispatch?: () => void;
+  onDispatch?: () => void | Promise<void>;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   authToken?: string;
   /**

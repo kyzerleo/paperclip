@@ -8,12 +8,16 @@ import { eq } from "drizzle-orm";
 import {
   agents,
   companies,
+  completeAutonomousAction,
+  consumeAutonomousActionOnce,
   createDb,
   heartbeatRuns,
   issues,
   projectWorkspaces,
   projects,
+  markAutonomousActionDispatched,
 } from "@paperclipai/db";
+import { autonomousActionLedger } from "@paperclipai/db/schema/autonomous_action_ledger";
 import {
   createDisposableAutonomousFixture,
   type DisposableAutonomousFixture,
@@ -30,7 +34,10 @@ import {
 import { agentService } from "../services/agents.js";
 import { issueService } from "../services/issues.js";
 import { projectService } from "../services/projects.js";
-import { admitHeartbeatAutonomousAction } from "../services/heartbeat-autonomous-admission.js";
+import {
+  admitHeartbeatAutonomousAction,
+  assertHeartbeatAutonomousDispatchOwnership,
+} from "../services/heartbeat-autonomous-admission.js";
 
 // Resolve the intended gateway adapter from the registry instead of
 // duplicating the dynamically forbidden local username in this fixture.
@@ -495,7 +502,31 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       effectPayload: { value: "once" },
       workerId: parentAgentId,
     });
-    expect(() => fixture.executeWithCrash(effect, "after-effect-before-ack")).toThrow("fixture_crash_after_effect_before_ack");
+    const productionAdmission = await admitHeartbeatAutonomousAction({
+      db,
+      adapterType: gatewayAdapter.type,
+      companyId,
+      workerId: parentAgentId,
+      executionId: parentRunId,
+      runId: parentRunId,
+      context: {
+        taskId: effect.taskId,
+        autonomous: effect as unknown as Record<string, unknown>,
+      },
+    });
+    expect(productionAdmission).toMatchObject({ outcome: "CONSUMED", actionId: effect.actionId });
+    expect(await db.select({ status: autonomousActionLedger.status })
+      .from(autonomousActionLedger)
+      .where(eq(autonomousActionLedger.actionId, effect.actionId)))
+      .toEqual([{ status: "claimed" }]);
+    assertHeartbeatAutonomousDispatchOwnership({
+      aborted: false,
+      currentRun: { status: "running", companyId, agentId: parentAgentId },
+      companyId,
+      agentId: parentAgentId,
+    });
+    expect(await markAutonomousActionDispatched(db, companyId, effect.actionId)).toBe(true);
+    expect(await completeAutonomousAction(db, companyId, effect.actionId)).toBe(true);
     const restarted = await fixture.restartLike();
     fixtures.push(restarted);
     const checkpoint = restarted.getSessionCheckpoint(parentRunId);
@@ -516,12 +547,10 @@ describeEmbeddedPostgres("D14 real disposable mini-project E2E", () => {
       worker: { outcome: "EXISTING" },
       wakeup: { outcome: "RETURN_EXISTING" },
     });
-    expect(restarted.executeWithCrash(effect, "none")).toMatchObject({
-      outcome: "RETURN_EXISTING",
-      existingActionId: effect.actionId,
-    });
+    await expect(consumeAutonomousActionOnce(db, companyId, effect))
+      .resolves.toMatchObject({ outcome: "REJECT", actionId: effect.actionId });
     expect(restarted.wakeupCount()).toBe(1);
-    expect(restarted.effectCount()).toBe(2);
+    expect(restarted.effectCount()).toBe(1);
     expect(restarted.workerCount()).toBe(3);
 
     const resumedRunId = id();

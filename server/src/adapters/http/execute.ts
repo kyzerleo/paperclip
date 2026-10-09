@@ -27,7 +27,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // HTTP adapters have no child-process spawn event. Signal immediately
     // before starting the remote request so dispatch gates can release without
     // waiting for the endpoint to respond.
-    ctx.onDispatch?.();
+    await ctx.onDispatch?.();
     const res = await guardedHttpAdapterFetch(url, {
       method,
       headers: {

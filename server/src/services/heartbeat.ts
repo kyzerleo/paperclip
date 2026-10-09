@@ -25524,10 +25524,10 @@ export function heartbeatService(
                       );
                     },
                     onProviderStopped: collectStoppedInstructions,
-                    onDispatch: () => {
+                    onDispatch: async () => {
                       markDispatchStarted();
                       if (autonomousAdmission.outcome === "CONSUMED") {
-                        void markAutonomousActionDispatched(db, agent.companyId, autonomousAdmission.actionId);
+                        await markAutonomousActionDispatched(db, agent.companyId, autonomousAdmission.actionId);
                       }
                     },
                     signal: executionControl.controller.signal,

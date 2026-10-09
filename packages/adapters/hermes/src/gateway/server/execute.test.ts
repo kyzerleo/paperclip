@@ -101,11 +101,18 @@ describe("execute", () => {
       apiKey: "secret-key",
       timeoutSec: 5,
     });
-    const onDispatch = vi.fn();
+    let dispatchReleased = false;
+    let releaseDispatch!: () => void;
+    const dispatchReady = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const onDispatch = vi.fn(async () => {
+      await dispatchReady;
+      dispatchReleased = true;
+    });
     ctx.onDispatch = onDispatch;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/v1/runs")) {
+        expect(dispatchReleased).toBe(true);
         expect(onDispatch).toHaveBeenCalledTimes(1);
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -119,7 +126,11 @@ describe("execute", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await execute(ctx);
+    const execution = execute(ctx);
+    await vi.waitFor(() => expect(onDispatch).toHaveBeenCalledTimes(1));
+    expect(dispatchReleased).toBe(false);
+    releaseDispatch();
+    const result = await execution;
 
     expect(result.exitCode).toBe(0);
     expect(onDispatch).toHaveBeenCalledTimes(1);
