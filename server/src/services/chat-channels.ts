@@ -11241,7 +11241,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           and(
             eq(chatActions.deliveryId, input.activeDelivery.id),
             eq(chatActions.kind, "inbound_wakeup"),
-            eq(chatActions.status, "preparing"),
+            inArray(chatActions.status, ["preparing", "processing"]),
           ),
         );
       const staged = await stageProviderEffect(tx, {
